@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Error handling</title><link rel="stylesheet" href="demo.css"></head><body><main>
+<span class="tag">SIMULATED · NOT A REAL FAILURE</span>
+<h1>Error handling</h1>
+<p>When an upstream fails, the backend returns a real HTTP status with a stable error code. Navigations get a small HTML page; scripted requests get JSON. This table lists what the backend can return.</p>
+<table>
+<tr><th>Status</th><th>Code</th><th>Meaning</th></tr>
+<tr><td>400</td><td>invalid_url</td><td>The address could not be parsed</td></tr>
+<tr><td>403</td><td>private_target</td><td>Loopback/private address refused (SSRF protection)</td></tr>
+<tr><td>502</td><td>dns_failure</td><td>Host name did not resolve</td></tr>
+<tr><td>502</td><td>connection_refused</td><td>Upstream refused the connection</td></tr>
+<tr><td>504</td><td>upstream_timeout</td><td>No response headers within the timeout</td></tr>
+</table>
+<h2>Example JSON</h2>
+<pre>{
+  "error": {
+    "status": 504,
+    "code": "upstream_timeout",
+    "message": "The upstream server took too long to respond.",
+    "target": "https://slow.example/"
+  }
+}</pre>
+<nav class="links"><a href="index.html">Demo home</a><a href="article.html">Sample article</a><a href="rewriting.html">URL rewriting</a><a href="error.html">Error page</a></nav>
+</main><script>try{parent.postMessage({litespeed:"demo-nav",page:location.pathname.split("/").pop().replace(".html","")},location.origin)}catch(e){}</script></body></html>

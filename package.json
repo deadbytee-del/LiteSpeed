@@ -1,0 +1,19 @@
+{
+  "name": "litespeed",
+  "version": "0.1.0",
+  "description": "A lightweight, modular web proxy: static frontend for GitHub Pages plus a portable fetch-API backend.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "build:web": "node scripts/build-web.mjs",
+    "test": "node --test \"test/*.test.js\"",
+    "bench": "node scripts/bench.mjs",
+    "deploy:worker": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

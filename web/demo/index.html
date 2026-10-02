@@ -1,0 +1,12 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LiteSpeed static demo</title><link rel="stylesheet" href="demo.css"></head><body><main>
+<span class="tag">STATIC DEMO · NOT PROXIED</span>
+<h1>LiteSpeed static demo</h1>
+<p>You are looking at a page that ships inside the GitHub Pages frontend. It was <strong>not</strong> fetched by a proxy: GitHub Pages can only serve static files, so it cannot fetch or rewrite other sites by itself.</p>
+<h2>What is real here</h2>
+<ul><li>The interface: address bar, history, settings, progress indicator and status pill.</li>
+<li>The backend discovery and health check shown in the status pill and the Connection panel.</li>
+<li>The URL codec, which runs live on the <a href="rewriting.html">URL rewriting</a> page.</li></ul>
+<h2>What needs the backend</h2>
+<p>Loading <code>example.com</code> or any other real site. Deploy the API (see the README) and point this frontend at it; the same address bar then loads real pages through <code>/p/&#123;key&#125;/…</code> and this banner disappears.</p>
+<nav class="links"><a href="index.html">Demo home</a><a href="article.html">Sample article</a><a href="rewriting.html">URL rewriting</a><a href="error.html">Error page</a></nav>
+</main><script>try{parent.postMessage({litespeed:"demo-nav",page:location.pathname.split("/").pop().replace(".html","")},location.origin)}catch(e){}</script></body></html>

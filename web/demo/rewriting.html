@@ -1,0 +1,25 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>URL rewriting</title><link rel="stylesheet" href="demo.css"></head><body><main>
+<span class="tag">LIVE CODE · NO NETWORK</span>
+<h1>How URLs are rewritten</h1>
+<p>The backend maps every upstream URL to <code>/p/&#123;base64url(origin)&#125;{path}{query}</code>. This page runs the same codec in your browser. It only computes strings; nothing is fetched.</p>
+<h2>Try an address</h2>
+<input id="u" value="https://example.com/docs/page.html?a=1#top" aria-label="URL" spellcheck="false">
+<table id="out"></table>
+<h2>Relative references against that page</h2>
+<table id="rel"></table>
+<nav class="links"><a href="index.html">Demo home</a><a href="article.html">Sample article</a><a href="rewriting.html">URL rewriting</a><a href="error.html">Error page</a></nav>
+</main>
+<script type="module">
+import { encodeOrigin } from '../js/url.js';
+const base = () => { try { return new URL(document.getElementById('u').value); } catch { return null; } };
+const rw = (raw, b) => { if (/^(#|data:|javascript:|mailto:|tel:|blob:)/i.test(raw)) return raw + '  (left alone)'; const u = new URL(raw, b); return '/p/' + encodeOrigin(u.origin) + u.pathname + u.search + u.hash; };
+const cell = (s) => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+function render() {
+  const b = base(); const out = document.getElementById('out'), rel = document.getElementById('rel');
+  if (!b) { out.innerHTML = '<tr><td>Not a valid URL</td></tr>'; rel.innerHTML = ''; return; }
+  out.innerHTML = '<tr><th>origin</th><td>' + cell(b.origin) + '</td></tr><tr><th>key</th><td>' + encodeOrigin(b.origin) + '</td></tr><tr><th>proxy path</th><td>' + cell(rw(b.href, b)) + '</td></tr>';
+  rel.innerHTML = ['img/logo.png', '../index.html', '/root.css', '//cdn.example.net/lib.js', '?page=2', '#section', 'data:image/png;base64,AA==', 'mailto:hi@example.com']
+    .map((r) => '<tr><th>' + cell(r) + '</th><td>' + cell(rw(r, b)) + '</td></tr>').join('');
+}
+document.getElementById('u').addEventListener('input', render); render();
+</script><script>try{parent.postMessage({litespeed:"demo-nav",page:location.pathname.split("/").pop().replace(".html","")},location.origin)}catch(e){}</script></body></html>

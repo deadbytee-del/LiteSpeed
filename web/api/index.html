@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>LiteSpeed API</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0b0d'/%3E%3Cpath d='M18 4 8 18h7l-1 10 10-14h-7z' fill='%238b5cf6'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="../css/style.css">
+  <style>
+    body { height: auto; }
+    .doc { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 48px; max-width: 1040px; margin: 0 auto; padding: 32px 20px 80px; }
+    .toc { position: sticky; top: 72px; align-self: start; font-size: 13px; display: flex; flex-direction: column; gap: 6px; }
+    .toc a { color: var(--muted); } .toc a:hover { color: var(--text); text-decoration: none; }
+    article h1 { font-size: 30px; letter-spacing: -.02em; margin: 0 0 6px; }
+    article h2 { all: unset; display: block; font-size: 20px; font-weight: 600; margin: 44px 0 10px; padding-top: 12px; border-top: 1px solid var(--border); }
+    article h3 { font-size: 15px; margin: 24px 0 6px; font-weight: 600; }
+    article p, article li { color: #c9c9d1; }
+    code, pre { font-family: var(--mono); font-size: 13px; }
+    code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; color: var(--text); }
+    pre { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow: auto; margin: 10px 0; }
+    pre code { background: none; padding: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 10px 0; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+    td:first-child { white-space: nowrap; }
+    .m { font: 600 11px var(--mono); color: var(--accent-2); margin-right: 8px; }
+    .lede { color: var(--muted); margin: 0 0 20px; }
+    #live { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font: 13px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (max-width: 800px) { .doc { grid-template-columns: 1fr; gap: 16px; } .toc { position: static; flex-direction: row; flex-wrap: wrap; gap: 4px 14px; } }
+  </style>
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="../"><svg viewBox="0 0 32 32" width="20" height="20" aria-hidden="true"><path d="M18 4 8 18h7l-1 10 10-14h-7z" fill="currentColor"/></svg><span>LiteSpeed</span></a>
+  <span style="color:var(--muted);font-size:13px">API</span>
+</header>
+<div class="doc">
+  <nav class="toc" aria-label="Contents">
+    <a href="#overview">Overview</a><a href="#live-check">Live check</a><a href="#url-format">Proxy URL format</a><a href="#endpoints">Endpoints</a>
+    <a href="#requests">Request handling</a><a href="#responses">Response handling</a><a href="#cookies">Cookies</a><a href="#errors">Errors</a>
+    <a href="#cors">CORS</a><a href="#limits">Limitations</a><a href="#deploy">Deployment</a><a href="#config">Configuration</a>
+  </nav>
+  <article>
+    <h1>LiteSpeed API</h1>
+    <p class="lede">Version 0.1 · HTTP, no authentication, JSON for everything under <code>/api</code>.</p>
+
+    <h2 id="overview">Overview</h2>
+    <p>The API is a single stateless <code>fetch(Request) → Response</code> handler. It runs on Node, Cloudflare Workers and any runtime with the Fetch API. GitHub Pages hosts only the frontend; every endpoint below lives on the <strong>backend</strong> you deploy separately. The frontend finds it automatically (see <a href="#deploy">Deployment</a>).</p>
+
+    <h2 id="live-check">Live check</h2>
+    <p>This page probes the same way the frontend does:</p>
+    <div id="live">Checking…</div>
+
+    <h2 id="url-format">Proxy URL format</h2>
+<pre><code>{base}/p/{key}{path}{?query}
+
+key = base64url(origin)      e.g. https://example.com  →  aHR0cHM6Ly9leGFtcGxlLmNvbQ
+</code></pre>
+    <p>The upstream origin sits in the first path segment, so relative references inside a page resolve to the right place with no rewriting, and cookies can be scoped per upstream with <code>Path=/p/{key}/</code>. Fragments (<code>#…</code>) never reach the server.</p>
+    <p>If a root-relative request escapes rewriting (e.g. <code>/static/app.js</code> fired by unhooked script), the backend recovers the upstream from the <code>Referer</code> and answers <code>307</code> to the right proxy URL.</p>
+
+    <h2 id="endpoints">Endpoints</h2>
+
+    <h3><span class="m">GET</span>/api/health</h3>
+    <p>Liveness probe, safe to poll. Always <code>200</code> when the service is up.</p>
+<pre><code>{ "status": "ok", "name": "litespeed", "version": "0.1.0",
+  "runtime": "node v22.22.0", "time": "2026-10-02T01:28:39.278Z", "uptimeMs": 879 }</code></pre>
+
+    <h3><span class="m">GET</span>/api/info</h3>
+    <p>Capabilities and limits: <code>features</code> (streaming, cache, rewriteJs, websockets=false, serviceWorkers=false), <code>limits</code> (header timeout, cache item size and TTL) and the configured CORS origins.</p>
+
+    <h3><span class="m">GET</span>/api/resolve?url=<em>address</em></h3>
+    <p>Normalises an address (adds <code>https://</code> when the scheme is missing), applies the target policy, and returns its proxy URL. <code>400</code> for unparseable input, <code>403</code> for refused targets.</p>
+<pre><code>{ "input": "example.com", "url": "https://example.com/",
+  "proxyPath": "/p/aHR0cHM6Ly9leGFtcGxlLmNvbQ/",
+  "proxyUrl": "https://api.example.workers.dev/p/aHR0cHM6Ly9leGFtcGxlLmNvbQ/" }</code></pre>
+
+    <h3><span class="m">GET</span>/api/go?url=<em>address</em></h3>
+    <p><code>302</code> to the proxy path. Useful for plain links: <code>{base}/api/go?url=https://example.com</code>.</p>
+
+    <h3><span class="m">GET</span>/api/ping?url=<em>address</em></h3>
+    <p>Measures the server-to-upstream round trip with a <code>HEAD</code> (falling back to a one-byte ranged <code>GET</code>). This is the number to use when separating network distance from proxy overhead.</p>
+<pre><code>{ "url": "https://example.com/", "status": 200, "ok": true, "upstreamMs": 41.3 }</code></pre>
+
+    <h3><span class="m">GET</span>/api/runtime.js</h3>
+    <p>The small client runtime injected into proxied HTML. It hooks <code>fetch</code>, <code>XMLHttpRequest</code>, <code>history</code>, <code>window.open</code>, DOM URL properties, <code>document.cookie</code> and Web Storage so scripted URLs and state stay inside the proxy. Cacheable for 24 h.</p>
+
+    <h3><span class="m">ANY</span>/p/{key}/{path}</h3>
+    <p>Proxies a resource. Methods: <code>GET HEAD POST PUT PATCH DELETE OPTIONS</code>. Request bodies are streamed to the upstream.</p>
+
+    <h2 id="requests">Request handling</h2>
+    <ul>
+      <li><strong>Forwarded:</strong> all request headers except hop-by-hop and infrastructure headers (<code>host</code>, <code>connection</code>, <code>accept-encoding</code>, <code>content-length</code>, <code>sec-*</code>, <code>cf-*</code>, <code>x-forwarded-*</code>, <code>via</code>, …).</li>
+      <li><strong>Referer / Origin:</strong> translated from proxy terms back to upstream terms, so CSRF and hot-link checks see the page's real origin.</li>
+      <li><strong>Redirects:</strong> never followed by the server. The status is preserved and <code>Location</code> is rewritten, so the browser walks the chain through the proxy and cookies are applied at each hop.</li>
+      <li><strong>Timeout:</strong> applies until response headers arrive (default 20 s); long downloads and streams are not cut off afterwards.</li>
+      <li><strong>Runtime injection:</strong> only for navigations (<code>Sec-Fetch-Dest</code> absent, <code>document</code>, <code>iframe</code> or <code>frame</code>); HTML fetched by scripts is rewritten but not injected.</li>
+    </ul>
+
+    <h2 id="responses">Response handling</h2>
+    <table>
+      <tr><th>Aspect</th><th>Behaviour</th></tr>
+      <tr><td>Status</td><td>Passed through unchanged (including 3xx, 4xx, 5xx, 206, 304).</td></tr>
+      <tr><td>Headers</td><td>Allow-list: content type/language/disposition/range, cache validators, <code>cache-control</code>, <code>vary</code>, <code>x-*</code> (except frame/XSS/nosniff/powered-by). <code>Content-Security-Policy</code>, <code>X-Frame-Options</code>, HSTS, COOP/COEP/CORP, <code>Link</code> and <code>Set-Cookie</code> (rewritten) are handled separately.</td></tr>
+      <tr><td>Rewritten types</td><td><code>text/html</code>, <code>application/xhtml+xml</code> (streamed), <code>text/css</code> (buffered). JavaScript is passed through untouched unless <code>LITESPEED_REWRITE_JS=on</code>, which rewrites absolute ES-module specifiers only. Everything else (images, fonts, media, JSON, WASM, SVG, PDF) is streamed as-is.</td></tr>
+      <tr><td>Compression</td><td>Upstream encodings are decoded by the runtime. The Node adapter re-compresses text types with Brotli or gzip (flushing per chunk, so streamed HTML stays progressive); on Cloudflare the edge compresses.</td></tr>
+      <tr><td>Caching</td><td>In-memory LRU (Node) or Cache API (Workers) for <code>GET</code> responses that are <code>200</code>, explicitly fresh (<code>max-age</code>/<code>s-maxage</code>), not <code>private</code>/<code>no-store</code>, without <code>Vary</code> (beyond encoding), without <code>Set-Cookie</code>, requested without <code>Cookie</code>/<code>Authorization</code>/<code>Range</code>, and ≤ 2 MB. Reported in <code>X-LiteSpeed-Cache: HIT | MISS | BYPASS</code>.</td></tr>
+      <tr><td>Timing</td><td><code>Server-Timing: upstream;dur=…, proxy;dur=…, rewrite;desc="html"</code>. The toolbar strip under a page reads these from the navigation entry.</td></tr>
+      <tr><td>Extra headers</td><td><code>X-LiteSpeed-Target</code> (resolved upstream URL), <code>X-LiteSpeed-Cache</code>.</td></tr>
+    </table>
+
+    <h2 id="cookies">Cookies</h2>
+    <p>No server-side session store. Upstream <code>Set-Cookie</code> headers are rewritten to <code>Path=/p/{key}/; Secure; SameSite=None; Partitioned</code>, with <code>Domain</code> removed, and kept in the browser on the API origin. The browser therefore only sends an upstream's cookies on requests to that upstream's proxy prefix. <code>Expires</code>, <code>Max-Age</code> and <code>HttpOnly</code> are preserved. <code>__Host-</code> cookies are dropped (they require <code>Path=/</code>).</p>
+
+    <h2 id="errors">Errors</h2>
+    <p>Navigations (<code>Accept: text/html</code>) receive a small HTML page; everything else receives JSON with the same HTTP status:</p>
+<pre><code>{ "error": { "status": 504, "code": "upstream_timeout",
+             "message": "The upstream server took too long to respond.",
+             "target": "https://slow.example/" } }</code></pre>
+    <table>
+      <tr><th>Status</th><th>Code</th><th>Cause</th></tr>
+      <tr><td>400</td><td><code>missing_url</code>, <code>invalid_url</code>, <code>unsupported_scheme</code>, <code>credentials_in_url</code>, <code>loop_detected</code>, <code>blocked_port</code></td><td>Bad or unsupported address</td></tr>
+      <tr><td>403</td><td><code>private_target</code>, <code>host_blocked</code>, <code>host_not_allowed</code></td><td>Target policy (see below)</td></tr>
+      <tr><td>404</td><td><code>not_found</code></td><td>Unknown API path / not a proxy path</td></tr>
+      <tr><td>405</td><td><code>method_not_allowed</code></td><td>Unsupported method on <code>/p/</code></td></tr>
+      <tr><td>502</td><td><code>dns_failure</code>, <code>connection_refused</code>, <code>connection_reset</code>, <code>tls_error</code>, <code>upstream_unreachable</code></td><td>Upstream could not be reached</td></tr>
+      <tr><td>504</td><td><code>upstream_timeout</code></td><td>No response headers in time</td></tr>
+    </table>
+    <p><strong>Target policy:</strong> only <code>http</code>/<code>https</code>; loopback, link-local, private and CGNAT ranges, single-label and <code>.local</code>/<code>.internal</code> names are refused. The Node adapter also resolves DNS and refuses names that point at private addresses (a small time-of-check gap remains; run it in a network without internal access for strong isolation). Optional allow/block host lists apply on top.</p>
+
+    <h2 id="cors">CORS</h2>
+    <p>All responses carry CORS headers. <code>LITESPEED_ALLOWED_ORIGINS</code> is <code>*</code> by default; set it to your Pages origin (e.g. <code>https://you.github.io</code>) to restrict browsers to it, in which case the matching origin is echoed with credentials allowed. Preflights (<code>OPTIONS</code> with <code>Access-Control-Request-Method</code>) are answered by the backend with <code>204</code>. Exposed headers: <code>Server-Timing</code>, <code>X-LiteSpeed-Cache</code>, <code>X-LiteSpeed-Target</code>, <code>Content-Length</code>.</p>
+
+    <h2 id="limits">Limitations</h2>
+    <ul>
+      <li><strong>No JavaScript rewriting.</strong> Scripts run unmodified; compatibility relies on the runtime hooks. <code>location.href = "https://other.site"</code> and similar navigations cannot be intercepted, and pages that inspect <code>location.hostname</code> see the proxy's host.</li>
+      <li><strong>WebSockets</strong> are not proxied (serverless runtimes cannot hold them open). Pages that need them connect directly or fail. <strong>Service workers</strong> are blocked.</li>
+      <li>Workers inside proxied pages do not get the runtime; their <code>fetch</code> calls are not rewritten.</li>
+      <li>Sites that bind sessions to IP, require device attestation, or use bot protection (Cloudflare Turnstile, reCAPTCHA) will not work.</li>
+      <li>Embedded mode relies on partitioned third-party cookies; browsers that block them break logins, so use "open in new tab".</li>
+      <li>Response size and CPU time are bounded by the host platform (e.g. Workers free plan CPU limit).</li>
+    </ul>
+
+    <h2 id="deploy">Deployment</h2>
+    <p>Requirements: any runtime with the Fetch API, <code>ReadableStream</code>/<code>TransformStream</code>, <code>TextDecoder</code> and outbound HTTPS. Node ≥ 20 or Cloudflare Workers are supported adapters.</p>
+    <p>The frontend picks its API in this order and uses the first that answers <code>/api/health</code> as LiteSpeed: <code>?api=</code> query parameter → saved setting → <code>config.json</code> (written at build time from <code>LITESPEED_API_URL</code>) → <code>window.LITESPEED_API</code> → same origin → <code>http://localhost:8787</code> (only when browsing from localhost). Step-by-step instructions are in the repository README.</p>
+
+    <h2 id="config">Configuration</h2>
+    <table>
+      <tr><th>Variable</th><th>Default</th><th>Meaning</th></tr>
+      <tr><td>LITESPEED_ALLOWED_ORIGINS</td><td><code>*</code></td><td>Comma list of browser origins allowed by CORS</td></tr>
+      <tr><td>LITESPEED_TIMEOUT_MS</td><td><code>20000</code></td><td>Upstream response-header timeout</td></tr>
+      <tr><td>LITESPEED_CACHE</td><td><code>on</code></td><td>Enable the response cache</td></tr>
+      <tr><td>LITESPEED_REWRITE_JS</td><td><code>off</code></td><td>Rewrite absolute ES-module specifiers in scripts</td></tr>
+      <tr><td>LITESPEED_ALLOWED_HOSTS</td><td>(empty)</td><td>If set, only these host suffixes can be proxied</td></tr>
+      <tr><td>LITESPEED_BLOCKED_HOSTS</td><td>(empty)</td><td>Host suffixes that are refused</td></tr>
+      <tr><td>LITESPEED_ALLOW_PRIVATE</td><td><code>off</code></td><td>Allow private targets (local development only)</td></tr>
+      <tr><td>LITESPEED_BASE_PATH</td><td>(empty)</td><td>Mount the API under a path prefix</td></tr>
+      <tr><td>LITESPEED_USER_AGENT</td><td>(empty)</td><td>Override the upstream User-Agent</td></tr>
+      <tr><td>LITESPEED_TRUST_PROXY</td><td><code>off</code></td><td>Node: honour <code>X-Forwarded-Proto/Host</code></td></tr>
+      <tr><td>PORT / HOST</td><td><code>8787</code> / <code>127.0.0.1</code></td><td>Node listener</td></tr>
+    </table>
+  </article>
+</div>
+<script type="module">
+  import { detectApi } from '../js/api.js';
+  import { loadSettings } from '../js/store.js';
+  const out = document.getElementById('live');
+  const api = await detectApi(loadSettings());
+  if (!api) out.textContent = 'No backend configured. This page is served statically, so there is nothing to query. Deploy the API and set LITESPEED_API_URL (see README).';
+  else if (!api.ok) out.textContent = api.url + '\nunreachable: ' + api.health.error;
+  else out.textContent = api.url + '  (' + api.source + ')\nGET /api/health → ' + api.health.ms.toFixed(0) + ' ms\n' + JSON.stringify(api.health.data, null, 2);
+</script>
+</body>
+</html>

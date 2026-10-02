@@ -1,0 +1,10 @@
+name = "litespeed-api"
+main = "src/adapters/cloudflare.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Comma-separated origins allowed to call the API from a browser.
+# Use your GitHub Pages origin in production, e.g. "https://you.github.io".
+LITESPEED_ALLOWED_ORIGINS = "*"
+LITESPEED_TIMEOUT_MS = "20000"
+LITESPEED_CACHE = "on"
