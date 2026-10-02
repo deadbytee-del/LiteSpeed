@@ -63,6 +63,8 @@ Put it behind TLS (Caddy, nginx, your platform's edge) and set `LITESPEED_TRUST_
 2. **Settings → Secrets and variables → Actions → Variables**: add `LITESPEED_API_URL` = your API URL (no trailing slash).
 3. Push to `main` (or run the *Deploy frontend* workflow). The workflow runs `npm run build:web`, which copies `web/` to `dist/` and writes `config.json` with your API URL.
 
+If you instead use **Source: Deploy from a branch** (`main`, `/ (root)`), the root `index.html` redirects to `web/`, which works too, but then `config.json` is not generated: use **Settings → API endpoint** or `?api=` to connect. The Actions route is recommended.
+
 Without step 2 the site still works as the static demo. You can also connect later from **Settings → API endpoint**, or by visiting `https://<user>.github.io/LiteSpeed/?api=https://your-api` (not persisted; handy for testing).
 
 **How the frontend finds the API.** In order, using the first candidate whose `/api/health` answers as LiteSpeed (all probed in parallel): `?api=` → saved setting → `config.json` → `window.LITESPEED_API` → same origin → `http://localhost:8787` (only when browsing from localhost).
