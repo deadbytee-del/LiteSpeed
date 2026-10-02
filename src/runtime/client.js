@@ -56,7 +56,7 @@ export const RUNTIME_SOURCE = String.raw`(function () {
   function unent(s) { return s.replace(/&(amp|quot|lt|gt|apos|#39);/g, function (m, n) { return n === '#39' ? "'" : ENT[n]; }); }
   function rwHtml(h) {
     if (typeof h !== 'string' || h.indexOf('<') < 0) return h;
-    return h.replace(/(<[a-zA-Z][^>]*?\s)(href|src|action|poster|formaction|srcset)(\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))/gi, function (m, pre, name, eq, q, a, b, c) {
+    return h.replace(/(<[a-zA-Z][^>]*?\s)(xlink:href|href|src|action|poster|formaction|srcset)(\s*=\s*)("([^"]*)"|'([^']*)'|([^\s>]+))/gi, function (m, pre, name, eq, q, a, b, c) {
       var val = a !== undefined ? a : b !== undefined ? b : c;
       var out = name.toLowerCase() === 'srcset' ? rwSrcset(unent(val)) : rw(unent(val));
       return pre + name + eq + '"' + String(out).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '"';
@@ -234,31 +234,98 @@ export const RUNTIME_SOURCE = String.raw`(function () {
   document.write = function () { return dw.apply(document, [].map.call(arguments, rwHtml)); };
   document.writeln = function () { return dwl.apply(document, [].map.call(arguments, rwHtml)); };
 
-  var URLATTR = { href: 1, src: 1, action: 1, poster: 1, formaction: 1 };
+
+  // --- CSS url() reaching the page through script (CSSOM, <style> text, shadow roots) ---
+  var CSS_URL = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s'"]*))\s*\)|@import\s+(?:"([^"]*)"|'([^']*)')/gi;
+  function rwCss(css) {
+    if (typeof css !== 'string' || (css.indexOf('url(') < 0 && css.indexOf('@import') < 0)) return css;
+    return css.replace(CSS_URL, function (m, a, b, c, d, e) {
+      var raw = a !== undefined ? a : b !== undefined ? b : c !== undefined ? c : d !== undefined ? d : e;
+      var out = raw === undefined ? raw : rw(raw);
+      if (out === raw) return m;
+      return m.charAt(0) === '@' ? '@import "' + out + '"' : 'url("' + out + '")';
+    });
+  }
+  (function () {
+    var sd = CSSStyleDeclaration.prototype;
+    var sp = sd.setProperty;
+    sd.setProperty = function (n, v, pr) { return sp.call(this, n, typeof v === 'string' ? rwCss(v) : v, pr); };
+    hookProp(sd, 'cssText', rwCss);
+    if (window.CSSStyleSheet) {
+      var ir = CSSStyleSheet.prototype.insertRule;
+      CSSStyleSheet.prototype.insertRule = function (r, i) { return ir.call(this, rwCss(r), i); };
+      ['replace', 'replaceSync'].forEach(function (m) {
+        var o = CSSStyleSheet.prototype[m];
+        if (o) CSSStyleSheet.prototype[m] = function (t) { return o.call(this, rwCss(t)); };
+      });
+    }
+    // <style> contents set through textContent / innerText
+    [[Node.prototype, 'textContent'], [HTMLElement.prototype, 'innerText']].forEach(function (pair) {
+      var d = Object.getOwnPropertyDescriptor(pair[0], pair[1]);
+      if (!d || !d.set) return;
+      Object.defineProperty(pair[0], pair[1], { configurable: true, enumerable: d.enumerable, get: d.get, set: function (v) { d.set.call(this, this.nodeName === 'STYLE' ? rwCss(v) : v); } });
+    });
+    // HTML parsed inside shadow roots and by the newer setHTML APIs bypasses Element.innerHTML
+    if (window.ShadowRoot) hookProp(ShadowRoot.prototype, 'innerHTML', rwHtml);
+    [Element.prototype, window.ShadowRoot && ShadowRoot.prototype].forEach(function (proto) {
+      if (!proto || !proto.setHTMLUnsafe) return;
+      var o = proto.setHTMLUnsafe;
+      proto.setHTMLUnsafe = function (h, opts) { return o.call(this, rwHtml(h), opts); };
+    });
+    if (Document.parseHTMLUnsafe) { var pu = Document.parseHTMLUnsafe; Document.parseHTMLUnsafe = function (h, o) { return pu.call(Document, rwHtml(h), o); }; }
+  })();
+
+  var URLATTR = { href: 1, src: 1, action: 1, poster: 1, formaction: 1, 'xlink:href': 1 };
   var sa = Element.prototype.setAttribute;
   Element.prototype.setAttribute = function (n, v) {
     var k = String(n).toLowerCase();
     if (URLATTR[k]) v = rw(v);
     else if (k === 'srcset') v = rwSrcset(String(v));
+    else if (k === 'style') v = rwCss(String(v));
     else if (k === 'data' && this.tagName === 'OBJECT') v = rw(v);
     else if (k === 'integrity') return;
     return sa.call(this, n, v);
   };
-  // Safety net for nodes inserted by other means (template cloning, adoption).
-  new MutationObserver(function (muts) {
+  var san = Element.prototype.setAttributeNS;
+  Element.prototype.setAttributeNS = function (ns, n, v) {
+    var k = String(n).toLowerCase();
+    if (k === 'href' || k === 'xlink:href') v = rw(v);
+    return san.call(this, ns, n, v);
+  };
+  // Safety net for nodes inserted by other means (template cloning, adoption) and for inline styles set
+  // through CSSOM. Chrome defines CSS longhands per element instance, so they cannot be hooked on a prototype;
+  // the observer's callback runs before style resolution, so the browser never fetches the unrewritten URL.
+  var MO_OPTS = { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] };
+  var mo = new MutationObserver(function (muts) {
     muts.forEach(function (m) {
+      if (m.type === 'attributes') {
+        var el0 = m.target, sv = el0.getAttribute('style');
+        if (sv && sv.indexOf('url(') >= 0) { var rv = rwCss(sv); if (rv !== sv) sa.call(el0, 'style', rv); }
+        return;
+      }
       m.addedNodes.forEach(function (n) {
+        if (n.nodeType === 3 && n.parentNode && n.parentNode.nodeName === 'STYLE') { var t = rwCss(n.data); if (t !== n.data) n.data = t; return; }
+        if (n.nodeType === 1 && n.nodeName === 'STYLE') { var c = n.textContent, r = rwCss(c); if (r !== c) n.textContent = r; }
         if (n.nodeType !== 1) return;
-        var els = [n].concat([].slice.call(n.querySelectorAll ? n.querySelectorAll('[src],[href],[action],[poster]') : []));
+        var els = [n].concat([].slice.call(n.querySelectorAll ? n.querySelectorAll('[src],[href],[action],[poster],[style]') : []));
         els.forEach(function (el) {
           for (var a in URLATTR) {
             var v = el.getAttribute && el.getAttribute(a);
             if (v) { var o = rw(v); if (o !== v) sa.call(el, a, o); }
           }
+          var st = el.getAttribute && el.getAttribute('style');
+          if (st && st.indexOf('url(') >= 0) { var rs = rwCss(st); if (rs !== st) sa.call(el, 'style', rs); }
         });
       });
     });
-  }).observe(document, { childList: true, subtree: true });
+  });
+  mo.observe(document, MO_OPTS);
+  var attachShadow0 = Element.prototype.attachShadow;
+  Element.prototype.attachShadow = function (init) {
+    var root = attachShadow0.call(this, init);
+    try { mo.observe(root, MO_OPTS); } catch (e) {}
+    return root;
+  };
 
   // --- state isolation (all proxied sites share one origin) ---
   function curKey() { return parseProxy(new URL(location.href)).key; }

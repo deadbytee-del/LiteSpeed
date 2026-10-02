@@ -32,6 +32,7 @@ const pages = http.createServer((q, res) => {
 
 /* --- upstream site --- */
 const sessions = new Set();
+let clip = null;
 const upstream = http.createServer((q, res) => {
   const u = new URL(q.url, 'http://x');
   const html = (b, h = {}) => { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', ...h }); res.end(b); };
@@ -71,6 +72,29 @@ window.__info.pm = 'pending';
 window.docLoc = () => document.location.pathname + '|' + window.location.search + '|' + new URL(location.href).pathname;
 </script></body></html>`);
   }
+  if (u.pathname === '/leaks') {
+    return html(`<!doctype html><title>leaks</title><style>#a,#b,#c{width:12px;height:12px;display:block}</style><div id="host"></div><div id="a"></div><div id="b"></div><div id="c"></div><svg width="10" height="10"><use id="u" /></svg>
+<script>
+const root = document.getElementById('host').attachShadow({ mode: 'open' });
+root.innerHTML = '<img id="sh" src="/pix.svg?shadow">';
+document.getElementById('a').style.backgroundImage = 'url(/pix.svg?cssom)';
+document.getElementById('b').style.cssText = 'background: url("/pix.svg?csstext")';
+const st = document.createElement('style'); st.textContent = '#c{background:url(/pix.svg?styletext)}'; document.head.appendChild(st);
+const sheet = new CSSStyleSheet(); sheet.replaceSync('#a{border-image:url(/pix.svg?constructed) 1}'); document.adoptedStyleSheets = [sheet];
+const t = document.createElement('template'); t.innerHTML = '<img id="tpl" src="/pix.svg?template">'; document.body.appendChild(t.content.cloneNode(true));
+document.getElementById('u').setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', '/pix.svg?svguse#x');
+const im = document.createElementNS('http://www.w3.org/2000/svg', 'image'); im.setAttribute('href', '/pix.svg?svgimage'); document.querySelector('svg').appendChild(im);
+</script>`);
+  }
+  if (u.pathname === '/video') return html('<!doctype html><title>video</title><video id="v" src="/clip.webm" muted autoplay loop playsinline width="160"></video>');
+  if (u.pathname === '/clip.webm') {
+    if (!clip) { res.writeHead(404); return res.end(); }
+    const range = /bytes=(\d*)-(\d*)/.exec(q.headers.range || '');
+    if (!range) { res.writeHead(200, { 'content-type': 'video/webm', 'accept-ranges': 'bytes', 'content-length': clip.length }); return res.end(clip); }
+    const a = range[1] === '' ? 0 : Number(range[1]); const b = range[2] === '' ? clip.length - 1 : Math.min(Number(range[2]), clip.length - 1);
+    res.writeHead(206, { 'content-type': 'video/webm', 'accept-ranges': 'bytes', 'content-range': `bytes ${a}-${b}/${clip.length}`, 'content-length': b - a + 1 });
+    return res.end(clip.subarray(a, b + 1));
+  }
   if (u.pathname === '/site.css') { res.writeHead(200, { 'content-type': 'text/css' }); return res.end('h1{color:rgb(1,2,3)} #bg{background:url(/pix.svg)}'); }
   if (u.pathname === '/pix.svg') { res.writeHead(200, { 'content-type': 'image/svg+xml' }); return res.end('<svg xmlns="http://www.w3.org/2000/svg" width="5" height="5"><rect width="5" height="5"/></svg>'); }
   if (u.pathname === '/pagead/js/adsbygoogle.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); return res.end('window.__adLoaded = true;'); }
@@ -89,12 +113,31 @@ const apiPort = await listen(api);
 const pagesPort = await listen(pages);
 const SHELL = `http://127.0.0.1:${pagesPort}/LiteSpeed/`;
 const UP = `http://127.0.0.1:${upPort}`;
+const UPORIGIN = UP;
 
 const browser = await pw.chromium.launch({ executablePath: exe, args: ['--no-sandbox'] });
 const ctx = await browser.newContext({ viewport: { width: 1100, height: 760 } });
 const page = await ctx.newPage();
 const problems = [];
 page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+// A short WebM recorded by the browser itself (no external tools needed).
+{
+  const rec = await ctx.newPage();
+  await rec.goto('about:blank');
+  const b64 = await rec.evaluate(async () => {
+    if (!window.MediaRecorder) return null;
+    const c = document.createElement('canvas'); c.width = 160; c.height = 90; const g = c.getContext('2d');
+    const stream = c.captureStream(15); const mr = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+    const chunks = []; mr.ondataavailable = (e) => chunks.push(e.data);
+    const done = new Promise((r) => (mr.onstop = r)); mr.start(100);
+    let n = 0; const t = setInterval(() => { g.fillStyle = `hsl(${(n++ * 20) % 360} 80% 50%)`; g.fillRect(0, 0, 160, 90); }, 50);
+    await new Promise((r) => setTimeout(r, 2500)); clearInterval(t); mr.stop(); await done;
+    const buf = new Uint8Array(await new Blob(chunks).arrayBuffer()); let s = ''; for (let i = 0; i < buf.length; i += 8192) s += String.fromCharCode(...buf.subarray(i, i + 8192));
+    return btoa(s);
+  });
+  await rec.close();
+  if (b64) clip = Buffer.from(b64, 'base64');
+}
 let passed = 0;
 const check = (name, fn) => fn().then(() => { passed++; console.log('  ok  ' + name); }, (e) => { problems.push(`${name}: ${e.message}`); console.log('  FAIL ' + name + '\n       ' + e.message.split('\n')[0]); });
 
@@ -197,6 +240,27 @@ await check('form POST: body, translated Origin and Referer', async () => {
   assert.match(t, /posted:q=hello/); assert.ok(t.includes(`origin:${UP}`), t); assert.ok(t.includes(`ref:${UP}/`), t);
 });
 
+await check('no resource escapes the proxy via shadow DOM, CSSOM, <style> text, constructed sheets, templates or SVG', async () => {
+  await page.fill('#bar-input', UP + '/leaks'); await page.keyboard.press('Enter');
+  await frame.locator('#host').waitFor({ timeout: 8000 });
+  const g = page.frames().find((x) => x.url().includes('/p/'));
+  await g.evaluate(() => { document.getElementById('a').offsetWidth; document.getElementById('c').offsetWidth; }); // force style resolution
+  await page.waitForTimeout(1500);
+  const names = await g.evaluate(() => performance.getEntriesByType('resource').map((e) => e.name));
+  const escaped = names.filter((n) => n.startsWith(UPORIGIN));
+  assert.deepEqual(escaped, []);
+  for (const q of ['shadow', 'cssom', 'csstext', 'styletext', 'constructed', 'template', 'svguse', 'svgimage']) assert.ok(names.some((n) => n.includes(`/p/`) && n.includes(q)), 'not requested through the proxy: ' + q);
+});
+await page.click('#back').catch(() => {}); await page.waitForTimeout(300);
+await check('media: <video> plays through the service worker with Range requests', async () => {
+  test_skip: if (!clip) { console.log('       (MediaRecorder unavailable; skipped)'); break test_skip; }
+  await page.fill('#bar-input', UP + '/video'); await page.keyboard.press('Enter');
+  await frame.locator('#v').waitFor({ timeout: 8000 });
+  const g = page.frames().find((x) => x.url().includes('/p/'));
+  await g.waitForFunction(() => { const v = document.getElementById('v'); return v.currentTime > 0.4 && v.readyState >= 2; }, null, { timeout: 12000 });
+  const r = await g.evaluate(async () => { const x = await fetch('/clip.webm', { headers: { Range: 'bytes=0-9' } }); return [x.status, x.headers.get('content-range'), (await x.arrayBuffer()).byteLength]; });
+  assert.equal(r[0], 206); assert.match(r[1], /^bytes 0-9\//); assert.equal(r[2], 10);
+});
 await check('relay errors are shown as an error page inside the frame', async () => {
   await page.fill('#bar-input', 'http://127.0.0.1:1/');
   await page.keyboard.press('Enter');

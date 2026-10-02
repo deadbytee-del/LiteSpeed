@@ -1,6 +1,7 @@
 import { createHtmlTransform, charsetFromContentType } from '../rewrite/html.js';
 import { rewriteCss, bufferedTextTransform } from '../rewrite/css.js';
 import { rewriteJs } from '../rewrite/js.js';
+import { stripJsonKeys, isYoutubeHost, isYoutubeApiPath } from '../adblock/json-prune.js';
 
 const isWorker = (dest) => /worker|worklet/.test(dest || '');
 
@@ -17,7 +18,7 @@ export function createRewriters(config) {
       test: (ct) => /^(text\/html|application\/xhtml\+xml)\b/i.test(ct),
       create: (ctx) => createHtmlTransform({
         base: ctx.base, basePath: ctx.basePath, inject: ctx.inject, runtimeTag: ctx.runtimeTag, headExtra: ctx.headExtra,
-        rewriteScripts: config.rewriteJs, charset: charsetFromContentType(ctx.contentType),
+        rewriteScripts: config.rewriteJs, scriptFilter: ctx.scriptFilter, charset: charsetFromContentType(ctx.contentType),
       }),
       contentType: (orig) => (/xhtml/i.test(orig) ? 'application/xhtml+xml; charset=utf-8' : 'text/html; charset=utf-8'),
     },
@@ -28,6 +29,14 @@ export function createRewriters(config) {
       contentType: () => 'text/css; charset=utf-8',
     },
   ];
+  if (config.adblock) {
+    list.push({
+      name: 'adjson',
+      test: (ct, { url }) => /json/i.test(ct) && url && isYoutubeHost(url.hostname) && isYoutubeApiPath(url.pathname),
+      create: (ctx) => bufferedTextTransform((t) => stripJsonKeys(t), { charset: cs(ctx) }),
+      contentType: (orig) => orig,
+    });
+  }
   if (config.rewriteJs) {
     list.push({
       name: 'js',

@@ -31,7 +31,8 @@ export function rewriteSrcset(value, base, basePath) {
  * Incomplete tags at chunk boundaries are carried into the next chunk.
  */
 export class HtmlRewriter {
-  constructor({ base, basePath, runtimeSrc, runtimeTag, headExtra = '', inject = true, rewriteScripts = true }) {
+  constructor({ base, basePath, runtimeSrc, runtimeTag, headExtra = '', inject = true, rewriteScripts = true, scriptFilter = null }) {
+    this.scriptFilter = scriptFilter;
     this.base = new URL(base);
     this.basePath = basePath;
     this.rewriteScripts = rewriteScripts;
@@ -107,7 +108,8 @@ export class HtmlRewriter {
   endBuffered(tail, kind) {
     const text = this.styleBuf + tail;
     this.styleBuf = '';
-    return kind === 'script' ? rewriteJs(text, this.base, this.basePath) : rewriteCss(text, this.base, this.basePath);
+    if (kind === 'script') return rewriteJs(this.scriptFilter ? this.scriptFilter(text) : text, this.base, this.basePath);
+    return rewriteCss(text, this.base, this.basePath);
   }
 
   inject(tag, name) {
@@ -120,7 +122,7 @@ export class HtmlRewriter {
     const name = NAME.exec(tag)[1].toLowerCase();
     if (RAW_TEXT.has(name) && !/\/>$/.test(tag)) {
       let kind = name === 'style' ? 'style' : null;
-      if (name === 'script' && this.rewriteScripts && !SRC_ATTR.test(tag)) {
+      if (name === 'script' && (this.rewriteScripts || this.scriptFilter) && !SRC_ATTR.test(tag)) {
         const type = TYPE_ATTR.exec(tag);
         if (isJsScriptType(type ? type[1] : '')) kind = 'script';
       }

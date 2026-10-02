@@ -17,6 +17,15 @@ A fast, lightweight web proxy in the style of Ultraviolet and Scramjet: a **serv
 
 GitHub Pages cannot proxy anything by itself. Without a relay it is an honestly-labelled static demo; with one it is the full proxy.
 
+## One-click setup (Windows): `setup.bat`
+
+Double-click `setup.bat` (it can be downloaded on its own; it fetches the project if needed). It installs Node.js via winget if missing, then asks:
+
+1. **Public endpoint**: deploys your own relay to the free Cloudflare Workers network and prints/copies the `https://litespeed-api.<you>.workers.dev` address. It asks for your Pages URL and allows only that site (plus localhost) to use the relay. You need a free Cloudflare account; the first run opens a browser to sign in. Nothing runs on your PC, and your PC is never exposed.
+2. **This PC**: runs the relay locally on `http://localhost:8787` (opens the site; paste the address into your Pages site's settings to use it there).
+
+I could not run the `.bat` itself in the development environment (no Windows); the pieces it relies on (the Worker bundle, `wrangler deploy --var`, CORS from the origin list) were tested separately. Free-plan limit: about 100,000 requests/day, and each page load uses one request per resource. Check Cloudflare's terms for your use before running a relay for other people.
+
 ## Quick start (everything on your machine)
 
 Node ≥ 20.
@@ -61,6 +70,14 @@ If you change anything under `src/` that the service worker uses, run `npm run b
 
 **HTTP/2 matters.** In service-worker mode every sub-resource of a page is a request to the relay origin, and HTTP/1.1 caps browsers at 6 connections per origin. Measured on this repo (`npm run bench:h2`, 150 images × 80 ms upstream, loopback): **2,337 ms over HTTP/1.1 vs 726 ms over HTTP/2**. Cloudflare and any modern reverse proxy give you h2; for a bare Node box set `LITESPEED_TLS_KEY`/`LITESPEED_TLS_CERT` and the server speaks h2 itself (HTTP/1.1 and WebSockets still work on the same port).
 
+## YouTube and other heavy sites
+
+What works: YouTube's pages, scripts, icons and styles load, the player's media requests use Range requests that the service worker handles (tested with a real `<video>`), and nothing escapes the proxy through shadow DOM, CSSOM, `<style>` text, constructed stylesheets, templates or SVG (tested).
+
+What decides whether playback works is the **IP address the relay uses**. Google answers requests from datacentre addresses (including Cloudflare Workers and most VPS hosts) with an "unusual traffic" page, regardless of what the proxy does; this was reproduced in development (HTTP 429 from `google.com/sorry`). **For YouTube, run the relay on your own PC (setup.bat option 2, or `npm start`)**: a home connection is treated very differently. LiteSpeed does not try to evade or solve CAPTCHAs.
+
+YouTube ads: with the ad blocker on, the ad fields (`adPlacements`, `playerAds`, `adSlots`) are removed from YouTube's player JSON and from the inline player response before the player reads them. This is tested on fixtures; it could not be verified against live YouTube from the development network, and YouTube changes these fields and its counter-measures often, so treat it as best effort.
+
 ## Ad blocker
 
 On by default (shield button in the toolbar; Settings for options).
@@ -70,7 +87,7 @@ On by default (shield button in the toolbar; Settings for options).
 - **Pop-ups** opened without a user gesture are blocked.
 - **Filter engine** (`src/adblock/engine.js`) understands Adblock Plus / uBlock syntax: `||domain^`, anchors, `*`, `^`, `@@` exceptions, `$script,image,…`, `$third-party`, `$domain=`, `##selector`, `#@#`. Rules it can't honour (`redirect=`, `removeparam=`, regex, procedural cosmetics) are skipped, not approximated. Pure-domain rules are a suffix lookup; the rest are token-indexed, so a 60,000-rule list costs well under 0.05 ms per request (tested).
 - A compact starter list ships in the service worker. **Settings → "Also load EasyList"** downloads EasyList through the relay and caches it.
-- Limits: first-party ads (e.g. YouTube video ads) need script-level blocking, which this doesn't do.
+- First-party ads are generally out of reach for network rules; YouTube gets the JSON pruning described above. Other first-party ad systems are not handled.
 
 ## Configuration
 
@@ -100,7 +117,7 @@ Full endpoint reference: the `/api` page of the frontend ([`web/api/index.html`]
 - **Transport** (`src/sw/bare-transport.js`): each request becomes a Bare v3 call (`X-Bare-URL`, `X-Bare-Headers`) to the relay, with retries on 502/503, per-host relay affinity and failover across several relays. Any Bare v3 server also works as a relay, and LiteSpeed's relay works for other Bare clients.
 - **HTML** is rewritten in one streaming pass: URL attributes, `srcset`, inline `style`/`<style>`, `<base>`, meta refresh; `integrity` and CSP meta removed; inline scripts go through the JS rewriter. **CSS** is rewritten for `url()`/`@import`. Other types stream untouched.
 - **JavaScript** is rewritten at token level (acorn tokenizer, no AST, ~20 MB/s) in a handful of places only: `location` → virtual location (so SPAs see the real URL), `top`/`parent` → the proxied window (so frame-busters stay inside), `x.postMessage(…)` → origin-agnostic, absolute module specifiers → proxied. Parameters/variables named `location` keep working because the wrapper returns anything that isn't the real `Location` unchanged. Anything the tokenizer can't parse is passed through untouched. Workers get unmodified source.
-- **Runtime** (`src/runtime/client.js`, injected first in `<head>`): hooks `fetch`, XHR, `EventSource`, `WebSocket` (via the relay), `history`, `window.open`, DOM URL properties, `innerHTML`/`insertAdjacentHTML`/`document.write`, cookies, `localStorage`/`sessionStorage`/IndexedDB (namespaced per site), `document.URL`/`domain`/`origin`, `MessageEvent.origin`; blocks service-worker registration; reports title/URL/timings to the toolbar.
+- **Runtime** (`src/runtime/client.js`, injected first in `<head>`): hooks `fetch`, XHR, `EventSource`, `WebSocket` (via the relay), `history`, `window.open`, DOM URL properties, `innerHTML` (also in shadow roots) / `insertAdjacentHTML` / `document.write` / `setHTMLUnsafe`, CSSOM and `<style>` URLs, inline `style`, cookies, `localStorage`/`sessionStorage`/IndexedDB (namespaced per site), `document.URL`/`domain`/`origin`, `MessageEvent.origin`; blocks service-worker registration; reports title/URL/timings to the toolbar.
 - **Cookies** live in a real RFC 6265 jar in the service worker (domain/path/secure/expiry/`HttpOnly`, `__Host-`/`__Secure-` rules), because a synthesised response can't set browser cookies. `document.cookie` is a synchronous mirror kept fresh over a `BroadcastChannel`.
 - **Frame isolation**: the shell sandboxes the iframe without `allow-top-navigation`; proxied pages see themselves as top-level.
 
@@ -137,7 +154,7 @@ npm run bench:h2                                        # needs playwright + chr
 ## Testing
 
 ```bash
-npm test                 # 69+ unit/integration tests: rewriters, JS rewrite validity, adblock, cookie jar, relay, WebSocket, limits, SW bundle freshness
+npm test                 # 74 unit/integration tests: rewriters, JS rewrite validity, adblock, cookie jar, relay, WebSocket, limits, SW bundle freshness
 npm run test:browser     # real Chromium: static Pages-style site + service worker + relay + a site with SPA routing,
                          # HttpOnly cookies, WebSocket, ads, redirects, forms, frame-busting (needs playwright)
 npm run smoke            # loads real websites through the whole stack and reports (needs network + playwright)

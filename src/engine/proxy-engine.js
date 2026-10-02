@@ -5,6 +5,7 @@ import { anySignal } from '../transport/fetch.js';
 import { ProxyError } from '../errors.js';
 import { createRewriters, isWorker } from './rewriters.js';
 import { requestType, blockedResponse } from '../adblock/index.js';
+import { stripJsonKeys, isYoutubeHost } from '../adblock/json-prune.js';
 import { VERSION } from '../version.js';
 
 const NO_BODY = new Set([101, 204, 205, 304]);
@@ -155,7 +156,7 @@ export class ProxyEngine {
     const status = up.status;
     const hasBody = up.body && method !== 'HEAD' && !NO_BODY.has(status);
     const ct = up.headers.get('content-type') || '';
-    const rewriter = hasBody && status !== 206 ? this.rewriters.find((r) => r.test(ct, { dest })) : null;
+    const rewriter = hasBody && status !== 206 ? this.rewriters.find((r) => r.test(ct, { dest, url })) : null;
     let body = hasBody ? up.body : null;
     let timing = `upstream;dur=${upstreamMs.toFixed(1)}, proxy;dur=${(now() - t0 - upstreamMs).toFixed(1)}`;
 
@@ -169,7 +170,8 @@ export class ProxyEngine {
           if (css) headExtra = `<style data-ls-adblock>${css}</style>`;
         }
       }
-      body = body.pipeThrough(rewriter.create({ base: url, basePath: config.basePath, inject, runtimeTag, headExtra, contentType: ct, destination: dest }));
+      const scriptFilter = this.adblock && config.adblock && isYoutubeHost(url.hostname) ? stripJsonKeys : undefined;
+      body = body.pipeThrough(rewriter.create({ base: url, basePath: config.basePath, inject, runtimeTag, headExtra, scriptFilter, contentType: ct, destination: dest }));
       for (const h of ['content-length', 'etag', 'last-modified', 'content-range', 'accept-ranges']) headers.delete(h);
       headers.set('content-type', rewriter.contentType(ct));
       timing += `, rewrite;desc="${rewriter.name}"`;
