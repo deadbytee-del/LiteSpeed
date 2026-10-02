@@ -9,7 +9,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "build:web": "node scripts/build-web.mjs",
-    "test": "node --test \"test/*.test.js\"",
+    "test": "node --test",
     "bench": "node scripts/bench.mjs",
     "deploy:worker": "wrangler deploy"
   },
