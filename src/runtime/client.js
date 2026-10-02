@@ -6,9 +6,13 @@ export const RUNTIME_SOURCE = String.raw`(function () {
   if (window.__litespeed) return;
   var script = document.currentScript;
   if (!script || !script.src) return;
-  var BP = new URL(script.src, location.href).pathname.replace(/\/api\/runtime\.js$/, '');
+  var DS = script.dataset || {};
+  var BP = DS.base != null ? DS.base : new URL(script.src, location.href).pathname.replace(/\/api\/runtime\.js$/, '');
+  var MODE = DS.mode || 'server';
+  var API = DS.api || '';
   var PREFIX = BP + '/p/';
   var ORIGIN = location.origin;
+  var realLocation = window.location;
 
   function b64d(k) { k = k.replace(/-/g, '+').replace(/_/g, '/'); while (k.length % 4) k += '='; return atob(k); }
   function b64e(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
@@ -22,7 +26,7 @@ export const RUNTIME_SOURCE = String.raw`(function () {
   }
   var here = parseProxy(new URL(location.href));
   if (!here) return;
-  window.__litespeed = { version: 1 };
+  window.__litespeed = { version: 2, mode: MODE };
 
   function upstreamBase() {
     var p = parseProxy(new URL(document.baseURI));
@@ -59,6 +63,105 @@ export const RUNTIME_SOURCE = String.raw`(function () {
     });
   }
 
+
+  // --- location virtualisation ---
+  // Rewritten scripts call __ls$g(location) etc., so pages see the real upstream URL.
+  function upstreamUrl() { return new URL(parseProxy(new URL(realLocation.href)).url); }
+  function navigate(u, replace) { var t = rw(u); if (replace) realLocation.replace(t); else realLocation.assign(t); }
+  var fake = Object.create(Location.prototype);
+  function part(name, set) {
+    Object.defineProperty(fake, name, {
+      enumerable: true, configurable: true,
+      get: function () { return upstreamUrl()[name]; },
+      set: function (v) { var u = upstreamUrl(); u[name] = v; navigate(u.href); }
+    });
+  }
+  ['protocol', 'host', 'hostname', 'port', 'pathname', 'search'].forEach(part);
+  Object.defineProperty(fake, 'origin', { enumerable: true, configurable: true, get: function () { return upstreamUrl().origin; } });
+  Object.defineProperty(fake, 'hash', { enumerable: true, configurable: true, get: function () { return upstreamUrl().hash; }, set: function (v) { realLocation.hash = v; } });
+  Object.defineProperty(fake, 'href', { enumerable: true, configurable: true, get: function () { return upstreamUrl().href; }, set: function (v) { navigate(v); } });
+  Object.defineProperty(fake, 'ancestorOrigins', { get: function () { return realLocation.ancestorOrigins; } });
+  fake.assign = function (u) { navigate(u); };
+  fake.replace = function (u) { navigate(u, true); };
+  fake.reload = function () { realLocation.reload(); };
+  fake.toString = function () { return upstreamUrl().href; };
+  Object.defineProperty(fake, Symbol.toPrimitive, { value: function () { return upstreamUrl().href; } });
+
+  function isProxied(w) { try { return !!w.__litespeed; } catch (e) { return false; } }
+  // The shell hosting this frame must stay invisible: act as the top-level window.
+  function g(x) {
+    if (x === realLocation) return fake;
+    try {
+      if (x && x.window === x && x !== window && !isProxied(x) && (x === window.top || x === window.parent)) return window;
+    } catch (e) {}
+    return x;
+  }
+  function isDocOrWin(t) { return t === window || t === document; }
+  function def(name, get, set) { Object.defineProperty(Object.prototype, name, { configurable: true, enumerable: false, get: get, set: set }); }
+  Object.defineProperty(window, '__ls$g', { value: g });
+  function pmImpl() {
+    var a = [].slice.call(arguments), w = false;
+    try { w = this && this.window === this; } catch (e) {}
+    if (w) {
+      var t = a[1];
+      if (typeof t === 'string' && t !== '*' && t !== '/') a[1] = '*';
+      else if (t && typeof t === 'object' && t.targetOrigin && t.targetOrigin !== '*') a[1] = Object.assign({}, t, { targetOrigin: '*' });
+    }
+    return this.postMessage.apply(this, a);
+  }
+  // Installs the helpers that rewritten code calls onto another realm's Object.prototype. Needed whenever
+  // a script can reach a window we do not run in (the hosting shell, about:blank iframes, popups).
+  function install(O, W, hideAs) {
+    var P = O.prototype;
+    O.defineProperty(P, '__ls$loc', {
+      configurable: true, enumerable: false,
+      get: function () { return (this === W || this === W.document) && hideAs ? hideAs : this.location; },
+      set: function (v) { if ((this === W || this === W.document) && hideAs) hideAs.href = v; else this.location = v; }
+    });
+    O.defineProperty(P, '__ls$top', { configurable: true, enumerable: false, get: function () { return this.top; }, set: function (v) { this.top = v; } });
+    O.defineProperty(P, '__ls$parent', { configurable: true, enumerable: false, get: function () { return this.parent; }, set: function (v) { this.parent = v; } });
+    O.defineProperty(P, '__ls$pm', { configurable: true, enumerable: false, writable: true, value: pmImpl });
+  }
+  def('__ls$loc', function () { return isDocOrWin(this) ? fake : this.location; },
+    function (v) { if (isDocOrWin(this)) fake.href = v; else this.location = v; });
+  def('__ls$top', function () { return g(this.top); }, function (v) { this.top = v; });
+  def('__ls$parent', function () { return g(this.parent); }, function (v) { this.parent = v; });
+  Object.defineProperty(Object.prototype, '__ls$pm', { configurable: true, enumerable: false, writable: true, value: pmImpl });
+  function share(w, hidden) {
+    try {
+      if (!w || w === window || isProxied(w)) return;
+      if (Object.prototype.hasOwnProperty.call(w.Object.prototype, '__ls$pm')) return;
+      install(w.Object, w, hidden ? fake : null);
+    } catch (e) { /* cross-origin window: nothing to install */ }
+  }
+  // Ancestors (the shell) are hidden behind our fake location; later-created same-origin windows get plain helpers.
+  try { var anc = window; for (var depth = 0; depth < 8 && anc.parent !== anc; depth++) { anc = anc.parent; share(anc, true); } } catch (e) {}
+  try {
+    var cw = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', { configurable: true, enumerable: cw.enumerable, get: function () { var w = cw.get.call(this); share(w, false); return w; } });
+    var cd0 = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentDocument');
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentDocument', { configurable: true, enumerable: cd0.enumerable, get: function () { var d = cd0.get.call(this); if (d) share(d.defaultView, false); return d; } });
+  } catch (e) {}
+  // __ls$loc as a bare identifier (location = x  ->  __ls$loc = x)
+  Object.defineProperty(window, '__ls$loc', { configurable: true, get: function () { return fake; }, set: function (v) { fake.href = v; } });
+
+  function getter(proto, prop, fn) {
+    try { var d = Object.getOwnPropertyDescriptor(proto, prop); if (d && d.get) Object.defineProperty(proto, prop, { configurable: true, enumerable: d.enumerable, get: fn, set: d.set }); } catch (e) {}
+  }
+  getter(Document.prototype, 'URL', function () { return upstreamUrl().href; });
+  getter(Document.prototype, 'documentURI', function () { return upstreamUrl().href; });
+  getter(Document.prototype, 'domain', function () { return upstreamUrl().hostname; });
+  try { Object.defineProperty(window, 'origin', { configurable: true, get: function () { return upstreamUrl().origin; } }); } catch (e) {}
+  // All proxied pages share one real origin: make cross-window messaging behave as if they did not.
+  getter(MessageEvent.prototype, 'origin', (function () {
+    var d = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'origin').get;
+    return function () {
+      var o = d.call(this);
+      try { if (o === ORIGIN && this.source && this.source.__litespeed) return new URL(parseProxy(new URL(this.source.location.href)).url).origin; } catch (e) {}
+      return o;
+    };
+  })());
+
   // --- network ---
   var _fetch = window.fetch;
   window.fetch = function (input, init) {
@@ -83,7 +186,23 @@ export const RUNTIME_SOURCE = String.raw`(function () {
     W.prototype = C.prototype; window[n] = W;
   });
   var wo = window.open;
-  window.open = function (u) { var a = [].slice.call(arguments); if (u) a[0] = rw(u); return wo.apply(window, a); };
+  window.open = function (u) {
+    // Popups without a user gesture are almost always ads.
+    if (DS.popups === 'block' && navigator.userActivation && !navigator.userActivation.isActive) return null;
+    var a = [].slice.call(arguments); if (u) a[0] = rw(u); var w = wo.apply(window, a); share(w, false); return w;
+  };
+  if (API && window.WebSocket) {
+    var WS = window.WebSocket;
+    var relay = API.replace(/^http/, 'ws') + '/api/ws';
+    var PWS = function (url, protocols) {
+      var abs = new URL(String(url), upstreamBase());
+      if (abs.protocol === 'http:') abs.protocol = 'ws:'; else if (abs.protocol === 'https:') abs.protocol = 'wss:';
+      return protocols === undefined ? new WS(relay + '?url=' + encodeURIComponent(abs.href)) : new WS(relay + '?url=' + encodeURIComponent(abs.href), protocols);
+    };
+    PWS.prototype = WS.prototype;
+    ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) { PWS[k] = WS[k]; });
+    window.WebSocket = PWS;
+  }
   ['pushState', 'replaceState'].forEach(function (m) {
     var o = History.prototype[m];
     History.prototype[m] = function (s, t, u) { var r = o.call(this, s, t, u == null ? u : rw(u)); report(); return r; };
@@ -144,19 +263,48 @@ export const RUNTIME_SOURCE = String.raw`(function () {
   // --- state isolation (all proxied sites share one origin) ---
   function curKey() { return parseProxy(new URL(location.href)).key; }
   var cd = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie');
-  Object.defineProperty(Document.prototype, 'cookie', {
-    configurable: true,
-    get: function () { return cd.get.call(this); },
-    set: function (v) {
-      var parts = String(v).split(';'), out = [parts[0]];
-      for (var i = 1; i < parts.length; i++) {
-        var p = parts[i].trim(), k = p.split('=')[0].toLowerCase();
-        if (k === 'expires' || k === 'max-age') out.push(p);
-      }
-      out.push('Path=' + PREFIX + curKey() + '/', 'Secure', 'SameSite=None', 'Partitioned');
-      cd.set.call(this, out.join('; '));
+  if (MODE === 'sw') {
+    // Cookies live in the service worker's jar; this is a synchronous mirror kept fresh by the SW.
+    var mirror = ''; try { mirror = decodeURIComponent(DS.cookie || ''); } catch (e) {}
+    var sw = function () { return navigator.serviceWorker && navigator.serviceWorker.controller; };
+    var refresh = function () {
+      var c = sw(); if (!c) return;
+      var ch = new MessageChannel();
+      ch.port1.onmessage = function (e) { if (typeof e.data === 'string') mirror = e.data; };
+      c.postMessage({ ls: 'cookie-get', url: upstreamUrl().href }, [ch.port2]);
+    };
+    if ('BroadcastChannel' in window) {
+      var timer = 0;
+      new BroadcastChannel('litespeed-cookies').onmessage = function () { clearTimeout(timer); timer = setTimeout(refresh, 40); };
     }
-  });
+    Object.defineProperty(Document.prototype, 'cookie', {
+      configurable: true,
+      get: function () { return mirror; },
+      set: function (v) {
+        var str = String(v), c = sw();
+        if (c) c.postMessage({ ls: 'cookie-set', url: upstreamUrl().href, cookie: str });
+        var kv = str.split(';')[0], eq = kv.indexOf('='), name = kv.slice(0, eq).trim(), val = kv.slice(eq + 1).trim();
+        var gone = /max-age\s*=\s*-?0+\s*(;|$)|max-age\s*=\s*-/i.test(str) || /expires\s*=\s*[^;]*(19[0-9]{2}|1970)/i.test(str);
+        var parts = mirror ? mirror.split('; ').filter(function (p) { return p.slice(0, p.indexOf('=')) !== name; }) : [];
+        if (!gone) parts.push(name + '=' + val);
+        mirror = parts.join('; ');
+      }
+    });
+  } else {
+    Object.defineProperty(Document.prototype, 'cookie', {
+      configurable: true,
+      get: function () { return cd.get.call(this); },
+      set: function (v) {
+        var parts = String(v).split(';'), out = [parts[0]];
+        for (var i = 1; i < parts.length; i++) {
+          var p = parts[i].trim(), k = p.split('=')[0].toLowerCase();
+          if (k === 'expires' || k === 'max-age') out.push(p);
+        }
+        out.push('Path=' + PREFIX + curKey() + '/', 'Secure', 'SameSite=None', 'Partitioned');
+        cd.set.call(this, out.join('; '));
+      }
+    });
+  }
   function nsStorage(real) {
     var pre = 'ls:' + curKey() + ':';
     function keys() { var r = []; for (var i = 0; i < real.length; i++) { var k = real.key(i); if (k.indexOf(pre) === 0) r.push(k.slice(pre.length)); } return r; }

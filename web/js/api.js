@@ -34,7 +34,12 @@ async function readConfig() {
  */
 export async function detectApi(settings) {
   const cands = [];
-  const add = (url, source) => { url = normalizeApiUrl(url); if (url && !cands.some((c) => c.url === url)) cands.push({ url, source }); };
+  const add = (value, source) => {
+    for (const part of String(value || '').split(',')) {
+      const url = normalizeApiUrl(part);
+      if (url && !cands.some((c) => c.url === url)) cands.push({ url, source });
+    }
+  };
   add(new URLSearchParams(location.search).get('api'), 'query string');
   add(settings.apiUrl, 'settings');
   add(await readConfig(), 'config.json');
@@ -44,7 +49,11 @@ export async function detectApi(settings) {
 
   const results = await Promise.all(cands.map((c) => health(c.url)));
   const i = results.findIndex((r) => r.ok);
-  if (i >= 0) return { ...cands[i], health: results[i], ok: true };
+  if (i >= 0) {
+    // Every healthy explicitly configured relay is kept so the service worker can fail over between them.
+    const explicit = cands.map((c, k) => ({ c, r: results[k] })).filter(({ c, r }) => r.ok && c.source === cands[i].source).map(({ c }) => c.url);
+    return { ...cands[i], health: results[i], ok: true, all: explicit.length ? explicit : [cands[i].url] };
+  }
   // Nothing healthy: surface the most deliberate candidate (not the same-origin probe) as "down".
   const explicit = cands.findIndex((c) => !['same origin', 'localhost default'].includes(c.source));
   return explicit >= 0 ? { ...cands[explicit], health: results[explicit], ok: false } : null;

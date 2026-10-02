@@ -1,5 +1,6 @@
 import { rewriteUrl, toProxyPath } from '../url/codec.js';
 import { rewriteCss } from './css.js';
+import { rewriteJs, isJsScriptType } from './js.js';
 
 const URL_ATTRS = new Set(['href', 'src', 'action', 'poster', 'data', 'formaction', 'cite', 'background', 'longdesc', 'manifest']);
 const SRCSET_ATTRS = new Set(['srcset', 'imagesrcset']);
@@ -7,6 +8,8 @@ const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title', 'xmp']);
 const ATTR = /([^\s"'<>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 const TAG_END = /(?:[^>"']|"[^"]*"|'[^']*')*>/y;
 const NAME = /^<([A-Za-z][^\s/>]*)/;
+const SRC_ATTR = /\ssrc\s*=/i;
+const TYPE_ATTR = /\stype\s*=\s*["']?([^"'\s>]*)/i;
 // Cheap pre-check: most tags carry nothing we rewrite, so skip attribute parsing for them.
 const INTEREST = /(?:href|src|action|poster|data|formaction|cite|background|longdesc|manifest|srcset|style|integrity|target|content)\s*=|http-equiv/i;
 const MAX_CARRY = 256 * 1024;
@@ -28,10 +31,12 @@ export function rewriteSrcset(value, base, basePath) {
  * Incomplete tags at chunk boundaries are carried into the next chunk.
  */
 export class HtmlRewriter {
-  constructor({ base, basePath, runtimeSrc, inject = true }) {
+  constructor({ base, basePath, runtimeSrc, runtimeTag, headExtra = '', inject = true, rewriteScripts = true }) {
     this.base = new URL(base);
     this.basePath = basePath;
-    this.runtimeTag = inject && runtimeSrc ? `<script src="${runtimeSrc}"></script>` : '';
+    this.rewriteScripts = rewriteScripts;
+    const tag = runtimeTag || (runtimeSrc ? `<script src="${runtimeSrc}"></script>` : '');
+    this.runtimeTag = inject && tag ? tag + headExtra : '';
     this.injected = !this.runtimeTag;
     this.carry = '';
     this.raw = null; // { name, re, buffered }
@@ -47,19 +52,19 @@ export class HtmlRewriter {
 
     while (i < n) {
       if (this.raw) {
-        const { re, buffered } = this.raw;
+        const { re, buffered, kind } = this.raw;
         re.lastIndex = i;
         const m = re.exec(s);
         if (m) {
           const body = s.slice(i, m.index);
-          out += buffered ? this.endStyle(body) : body;
+          out += buffered ? this.endBuffered(body, kind) : body;
           this.raw = null;
           i = m.index;
           continue;
         }
         if (final) {
           const body = s.slice(i);
-          out += buffered ? this.endStyle(body) : body;
+          out += buffered ? this.endBuffered(body, kind) : body;
           this.raw = null;
           i = n;
         } else {
@@ -99,10 +104,10 @@ export class HtmlRewriter {
     return out;
   }
 
-  endStyle(tail) {
-    const css = this.styleBuf + tail;
+  endBuffered(tail, kind) {
+    const text = this.styleBuf + tail;
     this.styleBuf = '';
-    return rewriteCss(css, this.base, this.basePath);
+    return kind === 'script' ? rewriteJs(text, this.base, this.basePath) : rewriteCss(text, this.base, this.basePath);
   }
 
   inject(tag, name) {
@@ -114,7 +119,12 @@ export class HtmlRewriter {
   startTag(tag) {
     const name = NAME.exec(tag)[1].toLowerCase();
     if (RAW_TEXT.has(name) && !/\/>$/.test(tag)) {
-      this.raw = { name, re: new RegExp(`</${name}(?=[\\s/>])`, 'gi'), buffered: name === 'style' };
+      let kind = name === 'style' ? 'style' : null;
+      if (name === 'script' && this.rewriteScripts && !SRC_ATTR.test(tag)) {
+        const type = TYPE_ATTR.exec(tag);
+        if (isJsScriptType(type ? type[1] : '')) kind = 'script';
+      }
+      this.raw = { name, re: new RegExp(`</${name}(?=[\\s/>])`, 'gi'), buffered: !!kind, kind };
     }
     if (!INTEREST.test(tag)) return this.inject(tag, name);
     const nameLen = name.length + 1;
@@ -193,8 +203,8 @@ function sniffMetaCharset(bytes) {
   return m ? m[1] : null;
 }
 
-export function createHtmlTransform({ base, basePath, runtimeSrc, inject, charset }) {
-  const rw = new HtmlRewriter({ base, basePath, runtimeSrc, inject });
+export function createHtmlTransform({ charset, ...opts }) {
+  const rw = new HtmlRewriter(opts);
   const encoder = new TextEncoder();
   let decoder = null;
   const init = (first) => {

@@ -22,7 +22,6 @@ export function rewriteSetCookie(header, key, basePath = '') {
   return out.join('; ');
 }
 
-export function rewriteSetCookies(headers, key, basePath = '') {
-  const list = typeof headers.getSetCookie === 'function' ? headers.getSetCookie() : [];
+export function rewriteSetCookies(list, key, basePath = '') {
   return list.map((c) => rewriteSetCookie(c, key, basePath)).filter(Boolean);
 }

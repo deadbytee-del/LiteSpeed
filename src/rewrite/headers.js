@@ -14,10 +14,11 @@ export function buildUpstreamHeaders(request, target, config) {
   for (const [k, v] of request.headers) if (!REQ_DROP.test(k)) h.set(k, v);
   if (config.userAgent) h.set('user-agent', config.userAgent);
 
-  const ref = request.headers.get('referer');
+  // In a service worker the Referer header is hidden but request.referrer is available.
+  const ref = request.headers.get('referer') || (request.referrer && request.referrer !== 'about:client' ? request.referrer : '');
   const refTarget = ref ? fromProxyUrl(ref, config.basePath) : null;
   if (refTarget) h.set('referer', refTarget.href);
-  if (request.headers.has('origin')) h.set('origin', refTarget ? refTarget.origin : target.origin);
+  if (request.headers.has('origin') || (request.method !== 'GET' && request.method !== 'HEAD')) h.set('origin', refTarget ? refTarget.origin : target.origin);
   return h;
 }
 

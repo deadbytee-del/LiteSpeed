@@ -4,7 +4,7 @@ const get = (k) => { try { return localStorage.getItem(k); } catch { return mem.
 const set = (k, v) => { try { localStorage.setItem(k, v); } catch { mem.set(k, v); } };
 const parse = (s, d) => { try { return s ? JSON.parse(s) : d; } catch { return d; } };
 
-const SETTINGS_DEFAULTS = { apiUrl: '', search: 'ddg', searchCustom: '', openMode: 'embed' };
+const SETTINGS_DEFAULTS = { apiUrl: '', search: 'ddg', searchCustom: '', openMode: 'embed', mode: 'auto', adblock: true, popups: true, easylist: false };
 export const loadSettings = () => ({ ...SETTINGS_DEFAULTS, ...parse(get('ls.settings'), {}) });
 export const saveSettings = (s) => set('ls.settings', JSON.stringify(s));
 

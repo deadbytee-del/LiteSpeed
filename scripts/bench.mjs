@@ -44,11 +44,14 @@ async function localSuite() {
   const html = '<!doctype html><html><head><title>bench</title><link rel="stylesheet" href="/a.css"></head><body>' +
     Array.from({ length: 1500 }, (_, i) => `<div class="row"><a href="/item/${i}?ref=bench">Item ${i}</a><img src="/img/${i}.png" alt=""><p>Lorem ipsum dolor sit amet ${i}</p></div>`).join('\n') + '</body></html>';
   const css = Array.from({ length: 800 }, (_, i) => `.c${i}{background:url(/img/${i}.png);color:#${(i * 4099 % 0xffffff).toString(16).padStart(6, '0')}}`).join('\n');
+  // ~300 KB of minified-looking script, with location/top references scattered through it.
+  const js = Array.from({ length: 2500 }, (_, i) => `function f${i}(a,b){var c=a.length+b;if(c>${i}){return window.location.pathname+"/x${i}"}return top===self?c:location.search.length+${i}}`).join('\n');
   const blob = Buffer.alloc(4 * 1024 * 1024, 7);
   const up = http.createServer((req, res) => {
     if (req.url === '/') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(html); }
     if (req.url === '/a.css') { res.writeHead(200, { 'content-type': 'text/css' }); return res.end(css); }
     if (req.url === '/cached.css') { res.writeHead(200, { 'content-type': 'text/css', 'cache-control': 'public, max-age=300' }); return res.end(css); }
+    if (req.url === '/app.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); return res.end(js); }
     if (req.url === '/blob') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': blob.length }); return res.end(blob); }
     res.writeHead(404); res.end();
   });
@@ -60,13 +63,20 @@ async function localSuite() {
 
   console.log(`self-contained, loopback, N=${N} (+${WARM} warm-up), html ${(html.length / 1024).toFixed(0)} KB, css ${(css.length / 1024).toFixed(0)} KB\n`);
   const rows = [];
-  for (const [name, path] of [['HTML (rewritten, streamed)', '/'], ['CSS (rewritten, buffered)', '/a.css'], ['4 MB binary (pass-through)', '/blob'], ['CSS with max-age (cache)', '/cached.css']]) {
+  for (const [name, path] of [['HTML (rewritten, streamed)', '/'], ['CSS (rewritten, buffered)', '/a.css'], ['JS 300 KB (token rewrite)', '/app.js'], ['4 MB binary (pass-through)', '/blob'], ['CSS with max-age (cache)', '/cached.css']]) {
     const d = await run(`direct   ${name}`, U + path);
     const p = await run(`proxied  ${name}`, P + path);
     rows.push([name, p.total - d.total, p.ttfb - d.ttfb]);
     console.log();
   }
+  // The relay path used by the service-worker mode does no rewriting at all.
+  const relay = (path) => ({ 'x-bare-url': U + path, 'x-bare-headers': '{}' });
+  const bareBase = `http://127.0.0.1:${server.address().port}/bare/v3/`;
+  const rd = await run('direct   HTML', U + '/');
+  const rr = await run('relay    HTML (bare v3, no rewrite)', bareBase, relay('/'));
+  console.log();
   console.log('added by proxy (p50 differences):');
+  console.log(`  ${'relay (service-worker mode)'.padEnd(30)} +${(rr.total - rd.total).toFixed(1)} ms total, ${rr.ttfb - rd.ttfb >= 0 ? '+' : ''}${(rr.ttfb - rd.ttfb).toFixed(1)} ms ttfb   (rewriting then runs in the browser)`);
   for (const [n, tot, ttfb] of rows) console.log(`  ${n.padEnd(30)} +${tot.toFixed(1)} ms total, ${ttfb >= 0 ? '+' : ''}${ttfb.toFixed(1)} ms ttfb`);
   up.closeAllConnections?.(); server.closeAllConnections?.(); up.close(); server.close();
 }

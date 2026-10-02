@@ -8,11 +8,12 @@ const out = path.join(root, 'dist');
 fs.rmSync(out, { recursive: true, force: true });
 fs.cpSync(path.join(root, 'web'), out, { recursive: true });
 
-const apiUrl = (process.env.LITESPEED_API_URL || '').trim().replace(/\/+$/, '');
-if (apiUrl && !/^https?:\/\//.test(apiUrl)) {
-  console.error(`LITESPEED_API_URL must start with http:// or https:// (got "${apiUrl}")`);
-  process.exit(1);
+// One URL, or several comma-separated relays (the service worker fails over between them).
+const apiUrls = (process.env.LITESPEED_API_URL || '').split(',').map((u) => u.trim().replace(/\/+$/, '')).filter(Boolean);
+for (const u of apiUrls) {
+  if (!/^https?:\/\//.test(u)) { console.error(`LITESPEED_API_URL entries must start with http:// or https:// (got "${u}")`); process.exit(1); }
 }
+const apiUrl = apiUrls.join(',');
 fs.writeFileSync(path.join(out, 'config.json'), JSON.stringify({ apiUrl }, null, 2) + '\n');
 fs.writeFileSync(path.join(out, '.nojekyll'), '');
 console.log(`dist/ ready. apiUrl=${apiUrl || '(auto-detect)'}`);

@@ -37,7 +37,7 @@
 </header>
 <div class="doc">
   <nav class="toc" aria-label="Contents">
-    <a href="#overview">Overview</a><a href="#live-check">Live check</a><a href="#url-format">Proxy URL format</a><a href="#endpoints">Endpoints</a>
+    <a href="#overview">Overview</a><a href="#live-check">Live check</a><a href="#url-format">Proxy URL format</a><a href="#endpoints">Endpoints</a><a href="#bare">Relay (Bare v3)</a><a href="#adblock">Ad blocker</a>
     <a href="#requests">Request handling</a><a href="#responses">Response handling</a><a href="#cookies">Cookies</a><a href="#errors">Errors</a>
     <a href="#cors">CORS</a><a href="#limits">Limitations</a><a href="#deploy">Deployment</a><a href="#config">Configuration</a>
   </nav>
@@ -46,7 +46,8 @@
     <p class="lede">Version 0.1 · HTTP, no authentication, JSON for everything under <code>/api</code>.</p>
 
     <h2 id="overview">Overview</h2>
-    <p>The API is a single stateless <code>fetch(Request) → Response</code> handler. It runs on Node, Cloudflare Workers and any runtime with the Fetch API. GitHub Pages hosts only the frontend; every endpoint below lives on the <strong>backend</strong> you deploy separately. The frontend finds it automatically (see <a href="#deploy">Deployment</a>).</p>
+    <p>The backend is a single stateless <code>fetch(Request) → Response</code> handler. It runs on Node, Cloudflare Workers and any runtime with the Fetch API. GitHub Pages hosts only the frontend; every endpoint below lives on the <strong>relay</strong> you deploy separately. The frontend finds it automatically (see <a href="#deploy">Deployment</a>).</p>
+    <p>There are two ways to proxy. In <strong>service-worker mode</strong> (default) the page's service worker rewrites everything in the browser and uses only <a href="#bare"><code>/bare/v3/</code></a> (and optionally <code>/api/ws</code>) on the relay. In <strong>server mode</strong> the relay rewrites pages itself under <code>/p/{key}/…</code>; it is the fallback when service workers are unavailable. Both run the same engine.</p>
 
     <h2 id="live-check">Live check</h2>
     <p>This page probes the same way the frontend does:</p>
@@ -89,6 +90,31 @@ key = base64url(origin)      e.g. https://example.com  →  aHR0cHM6Ly9leGFtcGxl
     <h3><span class="m">ANY</span>/p/{key}/{path}</h3>
     <p>Proxies a resource. Methods: <code>GET HEAD POST PUT PATCH DELETE OPTIONS</code>. Request bodies are streamed to the upstream.</p>
 
+    <h2 id="bare">Relay: Bare v3 and WebSocket</h2>
+    <h3><span class="m">GET</span>/bare/</h3>
+    <p>Bare server manifest: <code>{ "versions": ["v3"], "language": "JS", … }</code>.</p>
+    <h3><span class="m">ANY</span>/bare/v3/</h3>
+    <p>Compatible with the <a href="https://github.com/tomphttp/specifications">TompHTTP Bare v3</a> protocol, so other Bare clients can use LiteSpeed's relay and LiteSpeed's service worker can use other Bare servers. The request carries the real destination in headers; the relay performs it without following redirects:</p>
+<pre><code>X-Bare-URL: https://example.com/path?q=1
+X-Bare-Headers: {"accept":"text/html","cookie":"a=1","user-agent":"…"}
+X-Bare-Forward-Headers: accept-language        (optional: copy these from the relay request)
+X-Bare-Pass-Headers: content-type              (optional: also return these as real headers)
+X-Bare-Pass-Status: 304                        (optional: use these statuses as the real status)
+
+→ 200
+X-Bare-Status: 302
+X-Bare-Status-Text: Found
+X-Bare-Headers: {"location":"/next","set-cookie":["sid=1; Path=/"]}
+(body: the remote body, streamed)</code></pre>
+    <p>The relay decodes compressed bodies (so <code>content-encoding</code> is not returned) and re-compresses for the client where the adapter supports it. Errors from the relay itself use the JSON error shape below with a non-200 status and no <code>X-Bare-Status</code>. Timeouts apply to response headers only.</p>
+    <h3><span class="m">WS</span>/api/ws?url=wss://host/path[&amp;origin=…]</h3>
+    <p>WebSocket relay (Node adapter only). Text and binary frames and close codes are piped both ways; the subprotocol the remote selects is returned to the client. The target policy and <code>LITESPEED_ALLOWED_ORIGINS</code> apply. The in-page runtime points proxied pages' <code>WebSocket</code> constructor here.</p>
+    <h3>Load handling</h3>
+    <p>With <code>LITESPEED_MAX_INFLIGHT</code> set, requests beyond the cap get an immediate <code>503</code> (<code>code: overloaded</code>, with <code>Retry-After</code>); with <code>LITESPEED_RATE_LIMIT</code>, a client over its rate gets <code>429</code> (<code>rate_limited</code>). The service worker retries idempotent requests on another relay when several are configured. Serve the relay over HTTP/2 (Cloudflare, a reverse proxy, or <code>LITESPEED_TLS_KEY/CERT</code> on the Node server): service-worker mode sends every sub-resource to the relay origin, and HTTP/1.1 limits browsers to 6 connections per origin.</p>
+
+    <h2 id="adblock">Ad blocker</h2>
+    <p>Requests are checked against Adblock Plus/uBlock-syntax filters before they leave the browser (service-worker mode) or the server (server mode, <code>LITESPEED_ADBLOCK</code>). A blocked request gets a typed stand-in response with <code>X-LiteSpeed-Blocked: {rule}</code>: empty script or stylesheet, a 1×1 GIF, a blank iframe document, or <code>204</code>. Top-level navigations are never blocked. Element-hiding CSS is injected into HTML, and <code>window.open</code> without a user gesture returns <code>null</code>. A compact starter list is built in; EasyList can be added in Settings.</p>
+
     <h2 id="requests">Request handling</h2>
     <ul>
       <li><strong>Forwarded:</strong> all request headers except hop-by-hop and infrastructure headers (<code>host</code>, <code>connection</code>, <code>accept-encoding</code>, <code>content-length</code>, <code>sec-*</code>, <code>cf-*</code>, <code>x-forwarded-*</code>, <code>via</code>, …).</li>
@@ -103,15 +129,15 @@ key = base64url(origin)      e.g. https://example.com  →  aHR0cHM6Ly9leGFtcGxl
       <tr><th>Aspect</th><th>Behaviour</th></tr>
       <tr><td>Status</td><td>Passed through unchanged (including 3xx, 4xx, 5xx, 206, 304).</td></tr>
       <tr><td>Headers</td><td>Allow-list: content type/language/disposition/range, cache validators, <code>cache-control</code>, <code>vary</code>, <code>x-*</code> (except frame/XSS/nosniff/powered-by). <code>Content-Security-Policy</code>, <code>X-Frame-Options</code>, HSTS, COOP/COEP/CORP, <code>Link</code> and <code>Set-Cookie</code> (rewritten) are handled separately.</td></tr>
-      <tr><td>Rewritten types</td><td><code>text/html</code>, <code>application/xhtml+xml</code> (streamed), <code>text/css</code> (buffered). JavaScript is passed through untouched unless <code>LITESPEED_REWRITE_JS=on</code>, which rewrites absolute ES-module specifiers only. Everything else (images, fonts, media, JSON, WASM, SVG, PDF) is streamed as-is.</td></tr>
+      <tr><td>Rewritten types</td><td><code>text/html</code>, <code>application/xhtml+xml</code> (streamed), <code>text/css</code> (buffered), and JavaScript (buffered, token-level: <code>location</code>, <code>top</code>/<code>parent</code>, <code>x.postMessage(…)</code> and absolute/root-relative module specifiers; scripts requested as workers are left alone, and unparseable scripts pass through unchanged). Inline <code>&lt;script&gt;</code> elements get the same treatment. Everything else (images, fonts, media, JSON, WASM, SVG, PDF) is streamed as-is.</td></tr>
       <tr><td>Compression</td><td>Upstream encodings are decoded by the runtime. The Node adapter re-compresses text types with Brotli or gzip (flushing per chunk, so streamed HTML stays progressive); on Cloudflare the edge compresses.</td></tr>
       <tr><td>Caching</td><td>In-memory LRU (Node) or Cache API (Workers) for <code>GET</code> responses that are <code>200</code>, explicitly fresh (<code>max-age</code>/<code>s-maxage</code>), not <code>private</code>/<code>no-store</code>, without <code>Vary</code> (beyond encoding), without <code>Set-Cookie</code>, requested without <code>Cookie</code>/<code>Authorization</code>/<code>Range</code>, and ≤ 2 MB. Reported in <code>X-LiteSpeed-Cache: HIT | MISS | BYPASS</code>.</td></tr>
-      <tr><td>Timing</td><td><code>Server-Timing: upstream;dur=…, proxy;dur=…, rewrite;desc="html"</code>. The toolbar strip under a page reads these from the navigation entry.</td></tr>
+      <tr><td>Timing</td><td><code>Server-Timing: upstream;dur=…, proxy;dur=…, rewrite;desc="html"</code> (also set by the service worker). The toolbar strip under a page reads these from the navigation entry.</td></tr>
       <tr><td>Extra headers</td><td><code>X-LiteSpeed-Target</code> (resolved upstream URL), <code>X-LiteSpeed-Cache</code>.</td></tr>
     </table>
 
     <h2 id="cookies">Cookies</h2>
-    <p>No server-side session store. Upstream <code>Set-Cookie</code> headers are rewritten to <code>Path=/p/{key}/; Secure; SameSite=None; Partitioned</code>, with <code>Domain</code> removed, and kept in the browser on the API origin. The browser therefore only sends an upstream's cookies on requests to that upstream's proxy prefix. <code>Expires</code>, <code>Max-Age</code> and <code>HttpOnly</code> are preserved. <code>__Host-</code> cookies are dropped (they require <code>Path=/</code>).</p>
+    <p><strong>Service-worker mode:</strong> an RFC 6265 cookie jar in the service worker (persisted in IndexedDB) handles <code>Set-Cookie</code> and the outgoing <code>Cookie</code> header per upstream, including domain/path/secure/expiry, <code>HttpOnly</code> (hidden from <code>document.cookie</code>) and the <code>__Host-</code>/<code>__Secure-</code> rules. <strong>Server mode:</strong> stateless; upstream <code>Set-Cookie</code> is rewritten to <code>Path=/p/{key}/; Secure; SameSite=None; Partitioned</code> on the relay origin and the browser does the scoping (<code>__Host-</code> cookies are dropped).</p>
 
     <h2 id="errors">Errors</h2>
     <p>Navigations (<code>Accept: text/html</code>) receive a small HTML page; everything else receives JSON with the same HTTP status:</p>
@@ -120,31 +146,31 @@ key = base64url(origin)      e.g. https://example.com  →  aHR0cHM6Ly9leGFtcGxl
              "target": "https://slow.example/" } }</code></pre>
     <table>
       <tr><th>Status</th><th>Code</th><th>Cause</th></tr>
-      <tr><td>400</td><td><code>missing_url</code>, <code>invalid_url</code>, <code>unsupported_scheme</code>, <code>credentials_in_url</code>, <code>loop_detected</code>, <code>blocked_port</code></td><td>Bad or unsupported address</td></tr>
+      <tr><td>400</td><td><code>MISSING_BARE_HEADER</code>, <code>INVALID_BARE_HEADER</code>, <code>missing_url</code>, <code>invalid_url</code>, <code>unsupported_scheme</code>, <code>credentials_in_url</code>, <code>loop_detected</code>, <code>blocked_port</code></td><td>Bad or unsupported address</td></tr>
       <tr><td>403</td><td><code>private_target</code>, <code>host_blocked</code>, <code>host_not_allowed</code></td><td>Target policy (see below)</td></tr>
       <tr><td>404</td><td><code>not_found</code></td><td>Unknown API path / not a proxy path</td></tr>
       <tr><td>405</td><td><code>method_not_allowed</code></td><td>Unsupported method on <code>/p/</code></td></tr>
       <tr><td>502</td><td><code>dns_failure</code>, <code>connection_refused</code>, <code>connection_reset</code>, <code>tls_error</code>, <code>upstream_unreachable</code></td><td>Upstream could not be reached</td></tr>
+      <tr><td>429 / 503</td><td><code>rate_limited</code> / <code>overloaded</code></td><td>Load limits (see Load handling)</td></tr>
       <tr><td>504</td><td><code>upstream_timeout</code></td><td>No response headers in time</td></tr>
     </table>
     <p><strong>Target policy:</strong> only <code>http</code>/<code>https</code>; loopback, link-local, private and CGNAT ranges, single-label and <code>.local</code>/<code>.internal</code> names are refused. The Node adapter also resolves DNS and refuses names that point at private addresses (a small time-of-check gap remains; run it in a network without internal access for strong isolation). Optional allow/block host lists apply on top.</p>
 
     <h2 id="cors">CORS</h2>
-    <p>All responses carry CORS headers. <code>LITESPEED_ALLOWED_ORIGINS</code> is <code>*</code> by default; set it to your Pages origin (e.g. <code>https://you.github.io</code>) to restrict browsers to it, in which case the matching origin is echoed with credentials allowed. Preflights (<code>OPTIONS</code> with <code>Access-Control-Request-Method</code>) are answered by the backend with <code>204</code>. Exposed headers: <code>Server-Timing</code>, <code>X-LiteSpeed-Cache</code>, <code>X-LiteSpeed-Target</code>, <code>Content-Length</code>.</p>
+    <p>All responses carry CORS headers. <code>LITESPEED_ALLOWED_ORIGINS</code> is <code>*</code> by default; set it to your Pages origin (e.g. <code>https://you.github.io</code>) to restrict browsers to it, in which case the matching origin is echoed with credentials allowed. Preflights (<code>OPTIONS</code> with <code>Access-Control-Request-Method</code>) are answered by the backend with <code>204</code>, including <code>Access-Control-Allow-Private-Network</code> so an HTTPS page can use a relay on <code>localhost</code>. Exposed headers: <code>Server-Timing</code>, <code>X-LiteSpeed-Cache</code>, <code>X-LiteSpeed-Target</code>, <code>Content-Length</code>, <code>X-Bare-*</code>.</p>
 
     <h2 id="limits">Limitations</h2>
     <ul>
-      <li><strong>No JavaScript rewriting.</strong> Scripts run unmodified; compatibility relies on the runtime hooks. <code>location.href = "https://other.site"</code> and similar navigations cannot be intercepted, and pages that inspect <code>location.hostname</code> see the proxy's host.</li>
-      <li><strong>WebSockets</strong> are not proxied (serverless runtimes cannot hold them open). Pages that need them connect directly or fail. <strong>Service workers</strong> are blocked.</li>
-      <li>Workers inside proxied pages do not get the runtime; their <code>fetch</code> calls are not rewritten.</li>
-      <li>Sites that bind sessions to IP, require device attestation, or use bot protection (Cloudflare Turnstile, reCAPTCHA) will not work.</li>
-      <li>Embedded mode relies on partitioned third-party cookies; browsers that block them break logins, so use "open in new tab".</li>
-      <li>Response size and CPU time are bounded by the host platform (e.g. Workers free plan CPU limit).</li>
+      <li><strong>JS rewriting is token-level and deliberately small.</strong> <code>eval</code>/<code>new Function</code> strings, <code>window['location']</code> and destructuring <code>location</code> out of <code>window</code> are not covered. Heavy SPAs may break; bot-protection and device-attestation sites generally will.</li>
+      <li><strong>WebSockets</strong> need the Node relay (not Workers); WebRTC is not proxied. <strong>Service workers</strong> inside proxied pages are blocked; Workers launched by pages do not get the runtime.</li>
+      <li>The relay's IP address and TLS fingerprint are what sites see; sites that block them will refuse requests.</li>
+      <li>All proxied sites share the shell's real origin; the runtime namespaces cookies, storage and IndexedDB and the shell sandboxes the frame, but this is not a hard security boundary.</li>
+      <li>Service-worker mode needs HTTPS or localhost. Response size and CPU time on the relay are bounded by the host platform.</li>
     </ul>
 
     <h2 id="deploy">Deployment</h2>
     <p>Requirements: any runtime with the Fetch API, <code>ReadableStream</code>/<code>TransformStream</code>, <code>TextDecoder</code> and outbound HTTPS. Node ≥ 20 or Cloudflare Workers are supported adapters.</p>
-    <p>The frontend picks its API in this order and uses the first that answers <code>/api/health</code> as LiteSpeed: <code>?api=</code> query parameter → saved setting → <code>config.json</code> (written at build time from <code>LITESPEED_API_URL</code>) → <code>window.LITESPEED_API</code> → same origin → <code>http://localhost:8787</code> (only when browsing from localhost). Step-by-step instructions are in the repository README.</p>
+    <p>The frontend picks its API in this order and uses the first that answers <code>/api/health</code> as LiteSpeed: <code>?api=</code> query parameter → saved setting → <code>config.json</code> (written at build time from <code>LITESPEED_API_URL</code>) → <code>window.LITESPEED_API</code> → same origin (not on github.io) → <code>http://localhost:8787</code> (only when browsing from localhost). Several comma-separated relays are allowed; the service worker pins each site to one and fails over. To use a relay on your own machine from a Pages site, set its endpoint to <code>http://localhost:8787</code>. Step-by-step instructions are in the repository README.</p>
 
     <h2 id="config">Configuration</h2>
     <table>
@@ -152,7 +178,13 @@ key = base64url(origin)      e.g. https://example.com  →  aHR0cHM6Ly9leGFtcGxl
       <tr><td>LITESPEED_ALLOWED_ORIGINS</td><td><code>*</code></td><td>Comma list of browser origins allowed by CORS</td></tr>
       <tr><td>LITESPEED_TIMEOUT_MS</td><td><code>20000</code></td><td>Upstream response-header timeout</td></tr>
       <tr><td>LITESPEED_CACHE</td><td><code>on</code></td><td>Enable the response cache</td></tr>
-      <tr><td>LITESPEED_REWRITE_JS</td><td><code>off</code></td><td>Rewrite absolute ES-module specifiers in scripts</td></tr>
+      <tr><td>LITESPEED_REWRITE_JS</td><td><code>on</code></td><td>Server mode: token-level JS rewrite</td></tr>
+      <tr><td>LITESPEED_ADBLOCK</td><td><code>on</code></td><td>Server mode: ad/tracker blocking</td></tr>
+      <tr><td>LITESPEED_WORKERS</td><td><code>auto</code></td><td>Node cluster workers (CPUs, max 4)</td></tr>
+      <tr><td>LITESPEED_MAX_INFLIGHT</td><td><code>0</code></td><td>Per-worker concurrent-request cap (503 beyond)</td></tr>
+      <tr><td>LITESPEED_RATE_LIMIT</td><td><code>0</code></td><td>Per-client requests/second (429 beyond)</td></tr>
+      <tr><td>LITESPEED_TLS_KEY / _CERT</td><td>(empty)</td><td>PEM paths: serve HTTP/2 on the Node server</td></tr>
+      <tr><td>LITESPEED_UPSTREAM_PROXY</td><td>(empty)</td><td>Outbound HTTP(S) proxy</td></tr>
       <tr><td>LITESPEED_ALLOWED_HOSTS</td><td>(empty)</td><td>If set, only these host suffixes can be proxied</td></tr>
       <tr><td>LITESPEED_BLOCKED_HOSTS</td><td>(empty)</td><td>Host suffixes that are refused</td></tr>
       <tr><td>LITESPEED_ALLOW_PRIVATE</td><td><code>off</code></td><td>Allow private targets (local development only)</td></tr>

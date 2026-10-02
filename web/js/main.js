@@ -1,6 +1,9 @@
 import { loadSettings, saveSettings, loadHistory, addHistory, removeHistory, clearHistory } from './store.js';
 import { detectApi, health } from './api.js';
 import { normalizeInput, proxyUrl, hostOf, DEMO_PAGES } from './url.js';
+import { swSupported, basePath, registerSw, configureSw } from './sw-client.js';
+
+export const EASYLIST = 'https://easylist.to/easylist/easylist.txt';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -10,7 +13,12 @@ const el = {
 };
 
 let settings = loadSettings();
-let api = null; // { url, source, ok, health } | null
+let api = null; // { url, source, ok, health, all } | null
+let sw = null; // { reg } once the service worker is registered and configured
+let swError = '';
+let blocked = 0;
+let proxyBase = ''; // where proxied pages are loaded from: the SW scope (static) or the API origin (server rewrite)
+let frameOrigin = '';
 let current = null; // { kind: 'proxy' | 'demo', url }
 let navStart = 0;
 let readyTimer = 0;
@@ -21,13 +29,15 @@ const state = () => (!api ? 'demo' : api.ok ? 'ok' : 'down');
 function renderStatus(checking = false) {
   const s = checking ? 'checking' : state();
   el.pill.dataset.state = s;
-  const label = { checking: 'Checking…', ok: `Connected · ${Math.round(api?.health?.ms ?? 0)} ms`, down: 'Backend offline', demo: 'Static demo' }[s];
+  const label = { checking: 'Checking…', ok: `${sw ? 'Static proxy' : 'Connected'} · ${Math.round(api?.health?.ms ?? 0)} ms`, down: 'Backend offline', demo: 'Static demo' }[s];
   el.pill.querySelector('span').textContent = label;
   el.pill.title = api ? `${api.url} (${api.source})` : 'No proxy backend configured';
 
   const rows = [];
   const row = (k, v, cls = '') => rows.push(`<dt>${k}</dt><dd class="${cls}">${v}</dd>`);
-  row('Mode', s === 'ok' ? 'Full proxy' : 'Static demo only', s === 'ok' ? 'ok' : 'warn');
+  row('Mode', s !== 'ok' ? 'Static demo only' : sw ? 'Service worker (client-side rewriting)' : 'Server rewriting', s === 'ok' ? 'ok' : 'warn');
+  if (swError) row('Service worker', swError, 'warn');
+  row('Ad blocker', settings.adblock ? (sw ? `on · ${blocked} blocked` : 'on (server)') : 'off', settings.adblock ? 'ok' : '');
   row('Endpoint', api ? api.url : 'not configured');
   row('Source', api ? api.source : '–');
   row('Health', api ? (api.ok ? 'OK' : `Failed: ${api.health.error}`) : '–', api ? (api.ok ? 'ok' : 'bad') : '');
@@ -39,15 +49,46 @@ function renderStatus(checking = false) {
   row('Checked', new Date().toLocaleTimeString());
   el.conn.innerHTML = rows.join('');
 
-  if (s === 'ok') el.note.textContent = `Pages are fetched through ${hostOf(api.url)}.`;
+  if (s === 'ok') el.note.textContent = sw ? `Rewriting runs in your browser; ${hostOf(api.url)} only relays bytes.` : `Pages are fetched and rewritten by ${hostOf(api.url)}.`;
   else el.note.innerHTML = '<b>Static demo mode.</b> No proxy backend is connected, so real sites cannot be loaded. <a href="#" id="note-settings">Connect a backend</a> or <a href="demo/index.html" data-demo>open the demo</a>.';
 }
 
 async function refreshApi(showChecking = true) {
   if (showChecking) renderStatus(true);
   api = await detectApi(settings);
+  await setupProxy();
   renderStatus();
   return api;
+}
+
+/** Choose between client-side (service worker) and server-side rewriting and wire it up. */
+async function setupProxy(refreshLists = false) {
+  sw = null; swError = '';
+  proxyBase = api?.ok ? api.url : '';
+  const wantSw = settings.mode !== 'server';
+  if (api?.ok && wantSw) {
+    if (!swSupported()) swError = 'unavailable here (needs HTTPS or localhost); using server rewriting';
+    else {
+      try {
+        const reg = await registerSw();
+        const res = await configureSw(reg, {
+          apis: api.all?.length ? api.all : [api.url], adblock: settings.adblock, popups: settings.popups,
+          lists: settings.easylist ? [EASYLIST] : [],
+        }, refreshLists);
+        sw = { reg, lists: res.lists || [] };
+        proxyBase = location.origin + basePath();
+      } catch (e) { swError = `${e.message}; using server rewriting`; }
+    }
+  }
+  frameOrigin = proxyBase ? new URL(proxyBase).origin : '';
+  if (api?.url) preconnect(api.url);
+}
+
+function preconnect(url) {
+  if (document.querySelector(`link[rel=preconnect][href="${new URL(url).origin}"]`)) return;
+  const l = document.createElement('link');
+  l.rel = 'preconnect'; l.href = new URL(url).origin; l.crossOrigin = '';
+  document.head.append(l);
 }
 
 /* ---------- progress ---------- */
@@ -152,7 +193,7 @@ async function openProxy(url) {
     });
   }
   let target;
-  try { target = proxyUrl(api.url, url); } catch { return showError({ code: 'invalid_url', title: 'That address is not valid', text: `<code>${url.replace(/</g, '&lt;')}</code>` }); }
+  try { target = proxyUrl(proxyBase, url); } catch { return showError({ code: 'invalid_url', title: 'That address is not valid', text: `<code>${url.replace(/</g, '&lt;')}</code>` }); }
 
   current = { kind: 'proxy', url };
   el.barInput.value = url;
@@ -165,6 +206,7 @@ async function openProxy(url) {
   setBanner('');
   showBrowse();
   navStart = performance.now();
+  blocked = 0; renderShield();
   progressStart();
   el.timing.hidden = true;
   el.frame.src = target;
@@ -185,7 +227,7 @@ function cmd(c) {
   }
   if (c === 'reload' && !el.err.hidden) return openProxy(current.url);
   if (c === 'reload') { navStart = performance.now(); progressStart(); }
-  try { el.frame.contentWindow.postMessage({ litespeed: 'cmd', cmd: c }, new URL(api.url).origin); } catch { /* ignore */ }
+  try { el.frame.contentWindow.postMessage({ litespeed: 'cmd', cmd: c }, frameOrigin); } catch { /* ignore */ }
 }
 
 /* ---------- messages from the injected runtime ---------- */
@@ -196,7 +238,7 @@ window.addEventListener('message', (e) => {
     return;
   }
   if (e.source !== el.frame.contentWindow || !e.data || !e.data.litespeed) return;
-  if (!api || e.origin !== new URL(api.url).origin) return;
+  if (!api || e.origin !== frameOrigin) return;
   const d = e.data;
   if (d.litespeed === 'ready') { clearTimeout(readyTimer); e.source.postMessage({ litespeed: 'hello' }, e.origin); return; }
   if (d.litespeed !== 'nav' || current?.kind !== 'proxy') return;
@@ -257,10 +299,38 @@ function renderRecent() {
 async function openSettings() {
   const { openSettings: open } = await import('./settings.js');
   open($('settings'), settings, {
-    onSave: async (s) => { settings = s; saveSettings(s); await refreshApi(); },
+    sw: () => sw,
+    onSave: async (s) => { settings = s; saveSettings(s); await refreshApi(); renderShield(); },
+    onUpdateLists: async () => { await setupProxy(true); renderStatus(); return sw?.lists || []; },
     onClearHistory: () => { clearHistory(); renderRecent(); },
   });
 }
+
+/* ---------- ad blocker ---------- */
+function renderShield() {
+  const b = $('shield');
+  b.dataset.on = settings.adblock ? '1' : '0';
+  b.querySelector('span').textContent = settings.adblock && blocked ? String(blocked) : '';
+  b.title = settings.adblock ? `Ad blocker on${sw ? ` · ${blocked} blocked on this page` : ''}. Click to turn off.` : 'Ad blocker off. Click to turn on.';
+  b.setAttribute('aria-pressed', settings.adblock ? 'true' : 'false');
+}
+$('shield').onclick = async () => {
+  settings = { ...settings, adblock: !settings.adblock };
+  saveSettings(settings);
+  await setupProxy();
+  renderShield(); renderStatus();
+  if (current?.kind === 'proxy') openProxy(current.url);
+};
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.ls === 'blocked') { blocked += e.data.n; renderShield(); if (el.body.dataset.view === 'home') renderStatus(); }
+  });
+}
+// Open the TLS connection to the relay while the user is still typing.
+let warmed = 0;
+const warm = () => { if (api?.ok && Date.now() - warmed > 20000) { warmed = Date.now(); fetch(`${api.url}/api/health`, { cache: 'no-store' }).catch(() => {}); } };
+el.homeInput.addEventListener('focus', warm);
+el.barInput.addEventListener('focus', warm);
 
 /* ---------- wiring ---------- */
 const submit = (input) => (e) => { e.preventDefault(); const v = input.value; if (input === el.homeInput) input.value = ''; go(v); input.blur?.(); };
@@ -289,6 +359,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 renderRecent();
+renderShield();
 renderStatus(true);
 refreshApi(false).then(() => {
   // Deep link: ?go=<address> opens it immediately once the API has been probed.

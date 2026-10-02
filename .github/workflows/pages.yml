@@ -1,12 +1,12 @@
 # Publishes the static frontend. Enable it once under
 # Settings → Pages → Build and deployment → Source: "GitHub Actions".
 # Point the frontend at your API with a repository variable:
-#   Settings → Secrets and variables → Actions → Variables → LITESPEED_API_URL
+#   Settings → Secrets and variables → Actions → Variables → LITESPEED_API_URL (comma-separate several relays for failover)
 name: Deploy frontend to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ['web/**', 'scripts/build-web.mjs', '.github/workflows/pages.yml']
+    paths: ['web/**', 'src/**', 'scripts/build-*.mjs', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -26,6 +26,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - run: npm ci --no-audit --no-fund
       - run: npm run build:web
         env:
           LITESPEED_API_URL: ${{ vars.LITESPEED_API_URL }}

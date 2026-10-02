@@ -7,7 +7,9 @@ import { FetchTransport, anySignal } from './transport/fetch.js';
 import { MemoryCache } from './cache/memory.js';
 import { ProxyEngine } from './engine/proxy-engine.js';
 import { RUNTIME_SOURCE } from './runtime/client.js';
+import { createAdblock } from './adblock/index.js';
 import { errorPage } from './pages.js';
+import { bareV3, manifest as bareManifest } from './bare.js';
 
 const PROXY_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const ENDPOINTS = [
@@ -17,6 +19,9 @@ const ENDPOINTS = [
   ['GET', '/api/go?url=', 'Redirect to the proxied page'],
   ['GET', '/api/ping?url=', 'Measure server-to-upstream latency'],
   ['GET', '/api/runtime.js', 'Client runtime injected into proxied pages'],
+  ['ANY', '/bare/v3/', 'Bare v3 relay: used by the service-worker (static) mode'],
+  ['GET', '/bare/', 'Bare server manifest'],
+  ['WS', '/api/ws?url=', 'WebSocket relay (Node adapter only)'],
   ['ANY', '/p/{key}/{path}', 'Proxy a resource ({key} = base64url of the upstream origin)'],
 ];
 
@@ -29,7 +34,7 @@ export function createApp({ env = {}, config: overrides, runtime = 'unknown', tr
   const bp = config.basePath;
   const started = Date.now();
   const theCache = cache === undefined ? (config.cache ? new MemoryCache({ maxEntries: config.cacheMaxEntries, maxBytes: config.cacheMaxBytes }) : null) : cache;
-  const theEngine = engine || new ProxyEngine({ config, transport: transport || new FetchTransport(), cache: theCache });
+  const theEngine = engine || new ProxyEngine({ config, transport: transport || new FetchTransport(), cache: theCache, adblock: config.adblock ? createAdblock() : null });
   const theTransport = theEngine.transport;
 
   const json = (data, status = 200, headers = {}) =>
@@ -47,8 +52,10 @@ export function createApp({ env = {}, config: overrides, runtime = 'unknown', tr
     }
     headers.set('access-control-allow-methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
     headers.set('access-control-allow-headers', request.headers.get('access-control-request-headers') || '*');
-    headers.set('access-control-expose-headers', 'server-timing, x-litespeed-cache, x-litespeed-target, content-length');
+    headers.set('access-control-expose-headers', 'server-timing, x-litespeed-cache, x-litespeed-target, content-length, x-bare-status, x-bare-status-text, x-bare-headers');
     headers.set('access-control-max-age', '86400');
+    // Chrome's Private Network Access: a public HTTPS page may talk to a relay on localhost only if it opts in.
+    if (request.headers.get('access-control-request-private-network') === 'true') headers.set('access-control-allow-private-network', 'true');
     headers.set('timing-allow-origin', '*');
     return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
   }
@@ -88,11 +95,11 @@ export function createApp({ env = {}, config: overrides, runtime = 'unknown', tr
       case '/api/':
         return json({ name: 'LiteSpeed', version: VERSION, docs: 'See /api documentation page', endpoints: ENDPOINTS.map(([method, p, description]) => ({ method, path: bp + p, description })) });
       case '/api/health':
-        return json({ status: 'ok', name: 'litespeed', version: VERSION, runtime, time: new Date().toISOString(), uptimeMs: Date.now() - started });
+        return json({ status: 'ok', name: 'litespeed', version: VERSION, runtime, bare: 'v3', time: new Date().toISOString(), uptimeMs: Date.now() - started });
       case '/api/info':
         return json({
           name: 'litespeed', version: VERSION, runtime, basePath: bp,
-          features: { streaming: true, cookies: 'per-origin path-scoped', cache: !!theCache && config.cache, rewriteJs: config.rewriteJs, websockets: false, serviceWorkers: false },
+          features: { streaming: true, cookies: 'per-origin path-scoped', cache: !!theCache && config.cache, rewriteJs: config.rewriteJs, adblock: config.adblock, bare: 'v3', websockets: String(runtime).startsWith('node'), serviceWorkers: false },
           limits: { upstreamHeaderTimeoutMs: config.timeoutMs, cacheMaxItemBytes: config.cacheMaxItemBytes, cacheMaxTtlSeconds: config.cacheMaxTtl },
           corsOrigins: config.allowedOrigins.includes('*') ? ['*'] : config.allowedOrigins,
         });
@@ -142,6 +149,10 @@ export function createApp({ env = {}, config: overrides, runtime = 'unknown', tr
 
     if (!bp || pathname.startsWith(bp + '/') || pathname === bp) {
       const local = pathname.slice(bp.length) || '/';
+      if (local === '/bare' || local === '/bare/') return json(bareManifest());
+      if (local === '/bare/v3' || local === '/bare/v3/') {
+        return bareV3(request, { transport: theTransport, timeoutMs: config.timeoutMs, guard: (u) => guarded(u, url.host) });
+      }
       if (local === '/api' || local.startsWith('/api/')) {
         const res = await apiRoute(local.replace(/\/$/, '') || '/api', request, url, ctx);
         if (res) return res;

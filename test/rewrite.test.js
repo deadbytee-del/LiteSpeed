@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HtmlRewriter, createHtmlTransform, rewriteSrcset } from '../src/rewrite/html.js';
 import { rewriteCss } from '../src/rewrite/css.js';
-import { rewriteModuleSpecifiers } from '../src/rewrite/js.js';
+import { rewriteJs } from '../src/rewrite/js.js';
+import { parse } from 'acorn';
 import { encodeOrigin } from '../src/url/codec.js';
 
 const base = 'https://example.com/a/index.html';
@@ -85,12 +86,85 @@ test('css rewriting', () => {
   assert.equal(rewriteCss('a{color:red}', new URL(base), ''), 'a{color:red}');
 });
 
-test('module specifier rewriting is limited to absolute specifiers', () => {
-  const code = 'import a from "https://esm.test/a.js"; import "./local.js"; export * from "//cdn.test/b.js"; const x = import("https://esm.test/c.js"); const s = "https://not-an-import.test";';
-  const out = rewriteModuleSpecifiers(code, new URL(base), '');
+const js = (code) => rewriteJs(code, new URL(base), '');
+const valid = (code) => { try { parse(code, { ecmaVersion: 'latest' }); } catch { parse(code, { ecmaVersion: 'latest', sourceType: 'module' }); } };
+
+test('js: location reads/writes and frame-busting are redirected to the runtime helpers', () => {
+  assert.equal(js('var a=location.href;'), 'var a=__ls$g(location).href;');
+  assert.equal(js('document.location.assign(x); window.location = y'), 'document.__ls$loc.assign(x); window.__ls$loc = y');
+  assert.equal(js('location=url;'), '__ls$loc=url;');
+  assert.equal(js('if(top!==self)top.location=self.location;'), 'if(__ls$g(top)!==self)__ls$g(top).__ls$loc=self.__ls$loc;');
+  assert.equal(js('window.top.x; parent.postMessage(1,"*")'), 'window.__ls$top.x; __ls$g(parent).__ls$pm(1,"*")');
+  assert.equal(js('y = c ? location : o; z = typeof location'), 'y = c ? __ls$g(location) : o; z = typeof __ls$g(location)');
+});
+
+test('js: shadowed names, object keys, shorthand, properties and plain code are left alone (and stay valid)', () => {
+  const keep = [
+    'function f(location){return 1}', 'const {location}=window;', 'x={location,a:1}; y={location:2}', 'function g(a,location=1){}',
+    'var parent = 3; el.style.top="1px"; var r=el.top; node.parent.x', 'class A{ get location(){return 1} static top(){} }',
+    'foo(location); a = b / location / c; const re = /location/g;', 'const nothing = 1;',
+  ];
+  for (const c of keep) { const o = js(c); valid(o); assert.ok(!o.includes('__ls$loc =') || c.includes('='), c); }
+  assert.equal(js('function f(location){return 1}'), 'function f(location){return 1}');
+  assert.equal(js('x={location,a:1}; y={location:2}'), 'x={location,a:1}; y={location:2}');
+  assert.equal(js('el.style.top="1px"; var r=el.top;'), 'el.style.top="1px"; var r=el.top;');
+});
+
+test('js: a shadowing parameter still works because __ls$g returns non-Location values unchanged', () => {
+  const o = js('function f(location){return location.pathname}');
+  assert.equal(o, 'function f(location){return __ls$g(location).pathname}');
+  valid(o);
+});
+
+test('js: output stays valid on template literals, regex and modern syntax', () => {
+  for (const c of ['let s = `a ${location.href} b`;', 'const f = async (location) => { await location.x }', 'a?.b?.location?.c; x ??= location.y', 'label: for(;;){ break label }', '#!/usr/bin/env node\nlocation.reload()']) valid(js(c));
+});
+
+test('js: module specifiers that are absolute or root-relative are proxied; relative and bare are not', () => {
+  const out = js('import a from "https://esm.test/a.js"; import("/lazy.js"); import "./rel.js"; import b from "bare-pkg"; export * from "//cdn.test/b.js"; const s = "https://not-an-import.test";');
   assert.match(out, new RegExp(`from "/p/${encodeOrigin('https://esm.test')}/a.js"`));
-  assert.match(out, /import "\.\/local\.js"/);
+  assert.match(out, new RegExp(`import\\("/p/${K}/lazy.js"\\)`));
+  assert.match(out, /import "\.\/rel\.js"/);
+  assert.match(out, /from "bare-pkg"/);
   assert.match(out, new RegExp(`from "/p/${encodeOrigin('https://cdn.test')}/b.js"`));
-  assert.match(out, new RegExp(`import\\("/p/${encodeOrigin('https://esm.test')}/c.js"\\)`));
   assert.match(out, /"https:\/\/not-an-import.test"/);
+});
+
+test('js: unparseable input is returned untouched', () => {
+  const bad = 'var x = location.href; @@@ not js ###';
+  assert.equal(js(bad), bad);
+});
+
+test('html: inline scripts are rewritten, JSON/module-less data blocks and external scripts are not', () => {
+  const out = run('<script>a = location.href</script><script type="application/json">{"location":"x"}</script><script type="module">import "/m.js"; location.reload()</script><script src="x.js"></script>', { inject: false });
+  assert.match(out, /<script>a = __ls\$g\(location\)\.href<\/script>/);
+  assert.match(out, /<script type="application\/json">\{"location":"x"\}<\/script>/);
+  assert.match(out, new RegExp(`import "/p/${K}/m.js"; __ls\\$g\\(location\\)\\.reload\\(\\)`));
+});
+
+test('html: inline script rewriting is independent of chunk boundaries', () => {
+  const html = '<html><head></head><body><script>if (location.hash) { x = top.location.href }</script><p>t</p></body></html>';
+  const whole = run(html);
+  for (let size = 1; size < 30; size += 4) {
+    const r = mk();
+    let out = '';
+    for (let i = 0; i < html.length; i += size) out += r.process(html.slice(i, i + size));
+    out += r.process('', true);
+    assert.equal(out, whole, `chunk size ${size}`);
+  }
+  assert.match(whole, /__ls\$g\(location\)\.hash/);
+});
+
+test('js: frame-busting comparisons use the virtual top/parent', () => {
+  assert.equal(js('if (top === self) go()'), 'if (__ls$g(top) === self) go()');
+  assert.equal(js('if (self !== top) bust()'), 'if (self !== __ls$g(top)) bust()');
+  assert.equal(js('x = parent == window'), 'x = __ls$g(parent) == window');
+  valid(js('var top = 1; function f(parent){ return parent != null }'));
+});
+
+test('js: x.postMessage(...) call sites go through the realm-correct helper', () => {
+  assert.equal(js('parent.postMessage(m, "https://up.test")'), '__ls$g(parent).__ls$pm(m, "https://up.test")');
+  assert.equal(js('iframe.contentWindow.postMessage(a, b)'), 'iframe.contentWindow.__ls$pm(a, b)');
+  assert.equal(js('const f = obj.postMessage; w.postMessage'), 'const f = obj.postMessage; w.postMessage');
+  valid(js('worker.postMessage({a:1}, [buf])'));
 });
